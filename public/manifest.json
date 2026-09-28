@@ -1,0 +1,63 @@
+{
+  "name": "هابینو حسابداری | سیستم‌عامل جامع اصناف و فروشگاه‌ها",
+  "short_name": "هابینو",
+  "description": "سیستم‌عامل جامع کسب‌وکار همه‌کاره و آچارفرانسه هابینو برای تمامی اصناف خدماتی، فروشگاهی، تولیدی و شرکتی با معماری ابری و آفلاین-فرست",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "dir": "rtl",
+  "lang": "fa-IR",
+  "categories": [
+    "finance",
+    "business",
+    "productivity"
+  ],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "ثبت فاکتور جدید",
+      "short_name": "فاکتور",
+      "description": "صدور و چاپ آنی فاکتور فروش یا خدمات",
+      "url": "/?action=new-invoice",
+      "icons": [{ "src": "/icon.svg", "sizes": "96x96" }]
+    },
+    {
+      "name": "اسکنر بارکد و صیاد",
+      "short_name": "اسکنر",
+      "description": "اسکن بارکد کالا یا QR کد چک صیادی",
+      "url": "/?action=scanner",
+      "icons": [{ "src": "/icon.svg", "sizes": "96x96" }]
+    },
+    {
+      "name": "دفتر کل و تراز مالی",
+      "short_name": "دفتر کل",
+      "description": "مشاهده وضعیت دفاتر دوبل و ترازنامه سیستم",
+      "url": "/?action=ledger",
+      "icons": [{ "src": "/icon.svg", "sizes": "96x96" }]
+    }
+  ],
+  "related_applications": [
+    {
+      "platform": "play",
+      "id": "ir.habino.accounting.app",
+      "url": "https://cafebazaar.ir/app/ir.habino.accounting.app"
+    }
+  ],
+  "prefer_related_applications": false
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Habino Accounting",
+  "description": "سیستم‌عامل جامع کسب‌وکار همه‌کاره و آچارفرانسه هابینو برای تمامی اصناف خدماتی، فروشگاهی، تولیدی و شرکتی؛ پیشگام تغییر پارادایم به کسب‌وکارهای هوش مصنوعی‌محور برای دستیابی به بالاترین بهره‌وری با کمترین نیرو و هزینه.",
+  "requestFramePermissions": ["camera", "geolocation", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

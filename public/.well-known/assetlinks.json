@@ -1,0 +1,13 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "ir.habino.accounting.app",
+      "sha256_cert_fingerprints": [
+        "14:6D:E9:7D:0F:52:EA:43:EC:EA:EC:F2:E7:43:B6:58:18:14:9E:81:6F:0B:26:9A:F5:94:61:EC:30:2F:B0:11",
+        "8F:3B:5A:21:99:A0:72:E4:13:50:98:C1:47:82:19:D4:F2:E1:90:34:6C:58:EA:12:33:41:88:99:B2:77:45:C9"
+      ]
+    }
+  }
+]
