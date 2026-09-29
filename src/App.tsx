@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { AccountingProvider, useAccounting } from './lib/store';
 import { SiraFlowProvider } from './lib/siraflowStore';
 import { Dashboard } from './components/Dashboard';
@@ -12,35 +12,37 @@ import { Banks } from './components/Banks';
 import { Projects } from './components/Projects';
 import { Ledger } from './components/Ledger';
 import { Settings } from './components/Settings';
-import { DiagnosticModule } from './components/DiagnosticModule';
 import { SynapseVoiceChat } from './components/SynapseVoiceChat';
 import { AppHub } from './components/AppHub';
-import { RoadmapStudio } from './components/RoadmapStudio';
-import { HabinoDesktop } from './components/HabinoDesktop';
 import { LicenseManager } from './components/LicenseManager';
-import { BackupManager } from './components/BackupManager';
-import { Reports } from './components/Reports';
-import { DecentralizedIdStudio } from './components/DecentralizedIdStudio';
-import { OpenCommerceStudio } from './components/OpenCommerceStudio';
-import { PayrollStudio } from './components/PayrollStudio';
-import { BarcodeScannerStudio } from './components/BarcodeScannerStudio';
-import { FinancialAnalyticsDashboard } from './components/FinancialAnalyticsDashboard';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { LiveAgentDiagnosticStudio } from './components/LiveAgentDiagnosticStudio';
-import { PreLaunchAcceptanceStudio } from './components/PreLaunchAcceptanceStudio';
-import { AccountingVerificationStudio } from './components/AccountingVerificationStudio';
-import { StressTestEngineStudio } from './components/StressTestEngineStudio';
 import { UserManagementView } from './components/UserManagementView';
-import { TenantIsolationVerificationStudio } from './components/TenantIsolationVerificationStudio';
 import { LoginModal } from './components/LoginModal';
 import { UpgradeModal } from './components/UpgradeModal';
 import { HabinoLandingPage } from './components/HabinoLandingPage';
 import { BazaarOnboardingModal } from './components/BazaarOnboardingModal';
 import { SecurityGate } from './components/common/SecurityGates';
 import { ROLE_DETAILS_FA } from './lib/authEngine';
-import { PublicInvoiceView } from './components/PublicInvoiceView';
+
+// Lazy-loaded heavy modules for optimized bundle splitting & faster first load
+const DiagnosticModule = lazy(() => import('./components/DiagnosticModule').then(m => ({ default: m.DiagnosticModule })));
+const RoadmapStudio = lazy(() => import('./components/RoadmapStudio').then(m => ({ default: m.RoadmapStudio })));
+const HabinoDesktop = lazy(() => import('./components/HabinoDesktop').then(m => ({ default: m.HabinoDesktop })));
+const BackupManager = lazy(() => import('./components/BackupManager').then(m => ({ default: m.BackupManager })));
+const Reports = lazy(() => import('./components/Reports').then(m => ({ default: m.Reports })));
+const DecentralizedIdStudio = lazy(() => import('./components/DecentralizedIdStudio').then(m => ({ default: m.DecentralizedIdStudio })));
+const OpenCommerceStudio = lazy(() => import('./components/OpenCommerceStudio').then(m => ({ default: m.OpenCommerceStudio })));
+const PayrollStudio = lazy(() => import('./components/PayrollStudio').then(m => ({ default: m.PayrollStudio })));
+const BarcodeScannerStudio = lazy(() => import('./components/BarcodeScannerStudio').then(m => ({ default: m.BarcodeScannerStudio })));
+const FinancialAnalyticsDashboard = lazy(() => import('./components/FinancialAnalyticsDashboard').then(m => ({ default: m.FinancialAnalyticsDashboard })));
+const LiveAgentDiagnosticStudio = lazy(() => import('./components/LiveAgentDiagnosticStudio').then(m => ({ default: m.LiveAgentDiagnosticStudio })));
+const PreLaunchAcceptanceStudio = lazy(() => import('./components/PreLaunchAcceptanceStudio').then(m => ({ default: m.PreLaunchAcceptanceStudio })));
+const AccountingVerificationStudio = lazy(() => import('./components/AccountingVerificationStudio').then(m => ({ default: m.AccountingVerificationStudio })));
+const StressTestEngineStudio = lazy(() => import('./components/StressTestEngineStudio').then(m => ({ default: m.StressTestEngineStudio })));
+const TenantIsolationVerificationStudio = lazy(() => import('./components/TenantIsolationVerificationStudio').then(m => ({ default: m.TenantIsolationVerificationStudio })));
+const PublicInvoiceView = lazy(() => import('./components/PublicInvoiceView').then(m => ({ default: m.PublicInvoiceView })));
 
 import {
   LayoutDashboard,
@@ -112,17 +114,19 @@ const MainLayout: React.FC = () => {
   // If a public link token is present in the URL, render Public Invoice View directly (No login required)
   if (publicInvoiceToken) {
     return (
-      <PublicInvoiceView
-        token={publicInvoiceToken}
-        onBackToApp={() => {
-          const url = new URL(window.location.href);
-          url.searchParams.delete('invoice_token');
-          url.searchParams.delete('token');
-          url.searchParams.delete('share_token');
-          window.history.pushState({}, '', url.pathname);
-          setPublicInvoiceToken(null);
-        }}
-      />
+      <Suspense fallback={<div className="min-h-screen bg-slate-900 flex items-center justify-center text-white text-sm">در حال بارگذاری صورت‌حساب آنلاین...</div>}>
+        <PublicInvoiceView
+          token={publicInvoiceToken}
+          onBackToApp={() => {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('invoice_token');
+            url.searchParams.delete('token');
+            url.searchParams.delete('share_token');
+            window.history.pushState({}, '', url.pathname);
+            setPublicInvoiceToken(null);
+          }}
+        />
+      </Suspense>
     );
   }
 
@@ -148,13 +152,13 @@ const MainLayout: React.FC = () => {
 
   if (viewMode === 'desktop') {
     return (
-      <>
+      <Suspense fallback={<div className="h-screen bg-slate-900 flex items-center justify-center text-white text-sm">در حال بارگذاری میزکار دسکتاپ...</div>}>
         <HabinoDesktop
           onSwitchToClassicView={() => handleToggleViewMode('classic')}
           onSwitchToLandingView={() => handleToggleViewMode('landing')}
         />
         <UpgradeModal isOpen={upgradeModalOpen} onClose={() => setUpgradeModalOpen(false)} />
-      </>
+      </Suspense>
     );
   }
 
@@ -396,46 +400,53 @@ const MainLayout: React.FC = () => {
             onOpenLoginModal={() => setLoginModalOpen(true)}
             onOpenLicenseModal={() => setUpgradeModalOpen(true)}
           >
-            {activeTab === 'dashboard' && <Dashboard onNavigate={(tab) => setActiveTab(tab)} />}
-            {activeTab === 'analytics' && <FinancialAnalyticsDashboard onNavigateToModule={(mod) => setActiveTab(mod)} />}
-            {activeTab === 'hub' && <AppHub onSelectModule={(mod) => setActiveTab(mod)} />}
-            {activeTab === 'invoices' && <Invoices />}
-            {activeTab === 'checks' && <Checks />}
-            {activeTab === 'installments' && <Installments />}
-            {activeTab === 'transactions' && <Transactions />}
-            {activeTab === 'clients' && <Clients />}
-            {activeTab === 'inventory' && <Inventory />}
-            {activeTab === 'barcode_scanner' && (
-              <BarcodeScannerStudio
-                onNavigateToInvoice={() => setActiveTab('invoices')}
-                onNavigateToInventory={() => setActiveTab('inventory')}
-                onNavigateToChecks={(prefilledSayad) => {
-                  if (prefilledSayad) {
-                    localStorage.setItem('habino_pending_sayad_qr', JSON.stringify(prefilledSayad));
-                  }
-                  setActiveTab('checks');
-                }}
-              />
-            )}
-            {activeTab === 'banks' && <Banks />}
-            {activeTab === 'projects' && <Projects />}
-            {activeTab === 'did_protocol' && <DecentralizedIdStudio />}
-            {activeTab === 'open_commerce' && <OpenCommerceStudio />}
-            {activeTab === 'payroll' && <PayrollStudio />}
-            {activeTab === 'ledger' && <Ledger />}
-            {activeTab === 'reports' && <Reports />}
-            {activeTab === 'synapse' && <SynapseVoiceChat />}
-            {activeTab === 'diagnostics' && <DiagnosticModule />}
-            {activeTab === 'pre_launch_qa' && <PreLaunchAcceptanceStudio />}
-            {activeTab === 'accounting_verification' && <AccountingVerificationStudio standalone={true} />}
-            {activeTab === 'stress_test' && <StressTestEngineStudio standalone={true} />}
-            {activeTab === 'agents_studio' && <LiveAgentDiagnosticStudio />}
-            {activeTab === 'user_management' && <UserManagementView />}
-            {activeTab === 'tenant_isolation' && <TenantIsolationVerificationStudio />}
-            {activeTab === 'license' && <LicenseManager />}
-            {activeTab === 'backup' && <BackupManager />}
-            {activeTab === 'roadmap' && <RoadmapStudio />}
-            {activeTab === 'settings' && <Settings onClose={() => setActiveTab('dashboard')} />}
+            <Suspense fallback={
+              <div className="flex flex-col items-center justify-center p-12 min-h-[400px] text-slate-500 gap-3">
+                <div className="w-8 h-8 border-3 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                <span className="text-xs font-semibold">در حال بارگذاری ماژول تخصصی...</span>
+              </div>
+            }>
+              {activeTab === 'dashboard' && <Dashboard onNavigate={(tab) => setActiveTab(tab)} />}
+              {activeTab === 'analytics' && <FinancialAnalyticsDashboard onNavigateToModule={(mod) => setActiveTab(mod)} />}
+              {activeTab === 'hub' && <AppHub onSelectModule={(mod) => setActiveTab(mod)} />}
+              {activeTab === 'invoices' && <Invoices />}
+              {activeTab === 'checks' && <Checks />}
+              {activeTab === 'installments' && <Installments />}
+              {activeTab === 'transactions' && <Transactions />}
+              {activeTab === 'clients' && <Clients />}
+              {activeTab === 'inventory' && <Inventory />}
+              {activeTab === 'barcode_scanner' && (
+                <BarcodeScannerStudio
+                  onNavigateToInvoice={() => setActiveTab('invoices')}
+                  onNavigateToInventory={() => setActiveTab('inventory')}
+                  onNavigateToChecks={(prefilledSayad) => {
+                    if (prefilledSayad) {
+                      localStorage.setItem('habino_pending_sayad_qr', JSON.stringify(prefilledSayad));
+                    }
+                    setActiveTab('checks');
+                  }}
+                />
+              )}
+              {activeTab === 'banks' && <Banks />}
+              {activeTab === 'projects' && <Projects />}
+              {activeTab === 'did_protocol' && <DecentralizedIdStudio />}
+              {activeTab === 'open_commerce' && <OpenCommerceStudio />}
+              {activeTab === 'payroll' && <PayrollStudio />}
+              {activeTab === 'ledger' && <Ledger />}
+              {activeTab === 'reports' && <Reports />}
+              {activeTab === 'synapse' && <SynapseVoiceChat />}
+              {activeTab === 'diagnostics' && <DiagnosticModule />}
+              {activeTab === 'pre_launch_qa' && <PreLaunchAcceptanceStudio />}
+              {activeTab === 'accounting_verification' && <AccountingVerificationStudio standalone={true} />}
+              {activeTab === 'stress_test' && <StressTestEngineStudio standalone={true} />}
+              {activeTab === 'agents_studio' && <LiveAgentDiagnosticStudio />}
+              {activeTab === 'user_management' && <UserManagementView />}
+              {activeTab === 'tenant_isolation' && <TenantIsolationVerificationStudio />}
+              {activeTab === 'license' && <LicenseManager />}
+              {activeTab === 'backup' && <BackupManager />}
+              {activeTab === 'roadmap' && <RoadmapStudio />}
+              {activeTab === 'settings' && <Settings onClose={() => setActiveTab('dashboard')} />}
+            </Suspense>
           </SecurityGate>
         </main>
       </div>

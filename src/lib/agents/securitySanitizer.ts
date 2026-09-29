@@ -26,8 +26,10 @@ export function verifyAgentAccess(role: string, requiredPermission?: string): Ag
 
   if (!permissions) {
     // In local dev/test mode we can fallback gracefully
-    const isDev = (typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV) ||
-      (typeof process !== 'undefined' && typeof process.env === 'object' && process.env !== null && process.env.NODE_ENV !== 'production');
+    const isDev = Boolean(
+      (typeof process !== 'undefined' && process.env && process.env.NODE_ENV !== 'production') ||
+      (typeof window !== 'undefined' && (window as any).__DEV__)
+    );
     if (isDev || normalizedRole.includes('DEV') || normalizedRole.includes('ADMIN')) {
       return { allowed: true, role: normalizedRole, permissions: ['*'] };
     }

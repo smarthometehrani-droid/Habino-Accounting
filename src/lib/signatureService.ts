@@ -21,6 +21,9 @@ export interface UploadSignatureResult {
   signatureRecord: InvoiceSignature;
   shareToken: string;
   message: string;
+  cloudPersisted: boolean;
+  storagePersisted: boolean;
+  syncWarning?: string;
 }
 
 /**
@@ -122,6 +125,8 @@ export async function uploadAndRecordSignature(
           signatureUrl: result.signatureUrl,
           signatureRecord: result.signatureRecord,
           shareToken: result.shareToken || shareToken,
+          cloudPersisted: true,
+          storagePersisted: true,
           message: 'امضای رسمی با موفقیت در فضای ابری سوپابیس ذخیره و ثبت شد.'
         };
       }
@@ -129,6 +134,9 @@ export async function uploadAndRecordSignature(
   } catch (serverErr) {
     console.warn('[SignatureService] Server API upload attempt skipped/failed, using client Supabase SDK:', serverErr);
   }
+
+  let dbPersisted = false;
+  let bucketPersisted = false;
 
   // 2. Second attempt: Client-side Supabase SDK with explicit database persistence
   const config = getSupabaseConfig();
@@ -146,6 +154,7 @@ export async function uploadAndRecordSignature(
         });
 
       if (!uploadError && uploadData) {
+        bucketPersisted = true;
         const { data: publicUrlData } = supabase.storage
           .from('invoice-signatures')
           .getPublicUrl(filePath);
@@ -157,7 +166,7 @@ export async function uploadAndRecordSignature(
         const verificationToken = shareToken;
 
         // A. Insert signature log into invoice_signatures table
-        await supabase.from('invoice_signatures').insert({
+        const { error: insError } = await supabase.from('invoice_signatures').insert({
           invoice_id: invoiceId,
           tenant_id: tenantId,
           signature_url: publicSignatureUrl,
@@ -174,7 +183,7 @@ export async function uploadAndRecordSignature(
         });
 
         // B. Explicitly update invoices table so state persists on refresh
-        await supabase
+        const { error: updError } = await supabase
           .from('invoices')
           .update({
             share_token: verificationToken,
@@ -188,6 +197,10 @@ export async function uploadAndRecordSignature(
             }
           })
           .eq('id', invoiceId);
+
+        if (!insError && !updError) {
+          dbPersisted = true;
+        }
       }
     } catch (sdkErr) {
       console.warn('[SignatureService] Client Supabase SDK error:', sdkErr);
@@ -215,17 +228,25 @@ export async function uploadAndRecordSignature(
     signature_hash: signatureHash,
     metadata: {
       clientUploaded: true,
-      timestamp
+      timestamp,
+      persistedToCloud: dbPersisted
     },
     created_at: signedAt,
     updated_at: signedAt
   };
+
+  const isFullyPersisted = dbPersisted && bucketPersisted;
 
   return {
     success: true,
     signatureUrl: publicSignatureUrl,
     signatureRecord,
     shareToken,
-    message: 'امضا با موفقیت ثبت و در دیتابیس ماندگار شد.'
+    cloudPersisted: dbPersisted,
+    storagePersisted: bucketPersisted,
+    syncWarning: isFullyPersisted ? undefined : 'امضا در حافظه محلی ذخیره شد اما اتصال دیتابیس ابری برقرار نگردید.',
+    message: isFullyPersisted
+      ? 'امضا با موفقیت در فضای ابری سوپابیس ذخیره و در دیتابیس ثبت شد.'
+      : 'امضا در حافظه محلی ثبت شد. پس از برقراری اتصال به سوپابیس همگام‌سازی خواهد گردید.'
   };
 }

@@ -168,8 +168,8 @@ export const AutomatedAcceptanceSuite: React.FC = () => {
     {
       id: 'step-13-complex-scenarios-master-audit',
       order: 13,
-      title: 'ممیزی کلان سناریوهای پیچیده پروژه‌ها، دریافت و پرداخت‌ها و حقوق دستمزد (۲۴ سناریو)',
-      description: 'ارزیابی زنجیره‌ای ۲۴ سناریوی ترکیبی: پروژه‌ها، تنخواه، چک‌های اقساطی، واخواست، پیمانکار جزء، اضافه‌کاری، شب‌کاری، مأموریت، بازخرید مرخصی، تعدیل منفی، شراکت و تراز ۶ ستونی.',
+      title: 'ممیزی کلان سناریوهای پیچیده انواع فاکتور، مرجوعی، انبار، تسویه کارفرما و حقوق دستمزد (۳۲ سناریو)',
+      description: 'ارزیابی زنجیره‌ای ۳۲ سناریوی ترکیبی: انواع فاکتور (فروش، خرید، خدمات، پیش‌فاکتورها)، فاکتورهای برگشتی، انبارداری و کاردکس، سقف اعتبار مخاطبین، تنخواه گردان، تسویه کارفرما، حقوق و دستمزد و تراز ۶ ستونی.',
       ruleCode: 'RULE-16-COMPLEX-SCENARIOS-MASTER-AUDIT',
       status: 'idle'
     }
@@ -758,7 +758,7 @@ export const AutomatedAcceptanceSuite: React.FC = () => {
 
       const suiteResult = AccountingAutomatedTestEngine.runAllScenarios();
       if (suiteResult.failedScenarios > 0) {
-        throw new Error(`تعداد ${suiteResult.failedScenarios} سناریو از ۲۴ سناریو با خطا مواجه شدند.`);
+        throw new Error(`تعداد ${suiteResult.failedScenarios} سناریو از ۳۲ سناریو با خطا مواجه شدند.`);
       }
       if (!suiteResult.allTrialBalancesBalanced || suiteResult.totalDiscrepancyRial !== 0) {
         throw new Error(`ناترازی در ممیزی کلان تراز ۶ ستونی شناسایی شد! انحراف: ${suiteResult.totalDiscrepancyRial} ریال`);
@@ -766,9 +766,9 @@ export const AutomatedAcceptanceSuite: React.FC = () => {
 
       const t13End = performance.now();
       updateStepStatus(12, 'passed', {
-        resultMessage: `تمامی ۲۴ سناریوی پیچیده حسابداری با نرخ موفقیت ۱۰۰٪ و تراز آزمایشی ۶ ستونی با انحراف دقیقاً ۰ ریال تایید شدند.`,
+        resultMessage: `تمامی ۳۲ سناریوی پیچیده حسابداری با نرخ موفقیت ۱۰۰٪ و تراز آزمایشی ۶ ستونی با انحراف دقیقاً ۰ ریال تایید شدند.`,
         details: [
-          `تعداد سناریوهای ممیزی شده: ۲۴ سناریوی زنجیره‌ای (پروژه‌ها، دریافت و پرداخت، حقوق و دستمزد و ...)`,
+          `تعداد سناریوهای ممیزی شده: ۳۲ سناریوی زنجیره‌ای (انواع فاکتورها، مرجوعی‌ها، انبار، مخاطبین، تسویه کارفرما و ...)`,
           `تعداد کل آرتیکل‌های دوبل ارزیابی‌شده: ${suiteResult.totalEntriesEvaluated} ردیف سند در دفتر کل`,
           `مجموع گردش حساب‌ها: ${suiteResult.totalDebitSum.toLocaleString('fa-IR')} ریال (بدهکار = بستانکار با ۰ اختلاف)`,
           `شناسه گواهی ممیزی: ${suiteResult.certificateHash}`

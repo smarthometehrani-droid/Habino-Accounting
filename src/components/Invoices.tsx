@@ -2657,7 +2657,7 @@ export const Invoices: React.FC = () => {
                     type="button"
                     onClick={() => {
                       if (!isProformaType) {
-                        alert('طبق قوانین و استانداردهای حسابداری و مالیاتی، حذف فاکتورهای رسمی و قطعی ثبت‌شده در دفاتر مجاز نمی‌باشد.\n\nدر صورت انصراف، مرجوعی یا اشتباه، از صدور فاکتور برگشت از فروش/خرید یا ثبت سند اصلاحی در دفتر کل استفاده فرمایید.');
+                        setUnauthorizedDeleteInvoice(editingInvoice);
                         return;
                       }
                       setInvoiceToDelete(editingInvoice);
@@ -2716,6 +2716,11 @@ export const Invoices: React.FC = () => {
           invoice={previewInvoice}
           onClose={() => setPreviewInvoice(null)}
           onDelete={() => {
+            const isProforma = previewInvoice.type === 'proforma' || previewInvoice.type === 'proforma_sale' || previewInvoice.type === 'proforma_purchase';
+            if (!isProforma) {
+              setUnauthorizedDeleteInvoice(previewInvoice);
+              return;
+            }
             setInvoiceToDelete(previewInvoice);
           }}
         />

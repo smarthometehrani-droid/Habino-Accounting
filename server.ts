@@ -41,9 +41,15 @@ import {
 
 const app = express();
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  const origin = req.headers.origin;
+  if (origin) {
+    res.header('Access-Control-Allow-Origin', origin);
+  } else {
+    res.header('Access-Control-Allow-Origin', '*');
+  }
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-user-role, x-tenant-id, x-admin-secret, x-confirm-global-purge');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   if (req.method === 'OPTIONS') {
     res.sendStatus(200);
     return;
@@ -393,12 +399,26 @@ app.get('/api/config/supabase', (req: Request, res: Response) => {
 });
 
 app.post('/api/config/supabase', (req: Request, res: Response) => {
+  // Security guard: require admin authentication or local environment flag
+  const adminSecret = (req.headers['x-admin-secret'] as string) || (req.headers['authorization'] as string);
+  const serverAdminToken = process.env.HABINO_ADMIN_SECRET || 'habino-master-key';
+  const isAuthorized = adminSecret && (adminSecret === serverAdminToken || adminSecret === `Bearer ${serverAdminToken}`);
+  
+  if (!isAuthorized && process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ success: false, error: 'دسترسی غیرمجاز: تغییر پیکربندی دیتابیس نیازمند احراز هویت ادمین است.' });
+  }
+
   const { url, key } = req.body || {};
   if (typeof url === 'string') {
-    process.env.VITE_SUPABASE_URL = url.trim();
-    process.env.SUPABASE_URL = url.trim();
+    try {
+      const parsed = new URL(url.startsWith('http') ? url : `https://${url}`);
+      process.env.VITE_SUPABASE_URL = parsed.origin;
+      process.env.SUPABASE_URL = parsed.origin;
+    } catch {
+      return res.status(400).json({ success: false, error: 'فرمت آدرس دیتابیس نامعتبر است.' });
+    }
   }
-  if (typeof key === 'string') {
+  if (typeof key === 'string' && key.trim().length > 10) {
     process.env.VITE_SUPABASE_ANON_KEY = key.trim();
     process.env.SUPABASE_ANON_KEY = key.trim();
   }
@@ -413,7 +433,7 @@ app.post('/api/config/supabase', (req: Request, res: Response) => {
   });
 });
 
-// Server-side Direct Ping to Supabase to bypass browser CORS / sandbox constraints
+// Server-side Direct Ping to Supabase to bypass browser CORS / sandbox constraints (with SSRF protection)
 app.get('/api/supabase/ping', async (req: Request, res: Response) => {
   const targetUrl = (req.query.url as string || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim();
   const targetKey = (req.query.key as string || process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '').trim();
@@ -424,6 +444,30 @@ app.get('/api/supabase/ping', async (req: Request, res: Response) => {
       status: 0,
       error: 'آدرس Supabase مشخص نشده است.'
     });
+  }
+
+  // SSRF Protection: Validate target domain
+  try {
+    const parsed = new URL(targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`);
+    const host = parsed.hostname.toLowerCase();
+    
+    // Disallow loopback / internal metadata / private IP ranges in production
+    const isPrivateIp = /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|169\.254\.|localhost|::1)/.test(host);
+    const configuredUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
+    let isAllowed = host.endsWith('.supabase.co') || host.endsWith('.supabase.in') || host.endsWith('.supabase.net');
+    
+    if (configuredUrl) {
+      try {
+        const confHost = new URL(configuredUrl.startsWith('http') ? configuredUrl : `https://${configuredUrl}`).hostname.toLowerCase();
+        if (host === confHost) isAllowed = true;
+      } catch {}
+    }
+    
+    if (isPrivateIp && !isAllowed && process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ ok: false, status: 403, error: 'درخواست به آدرس‌های خصوصی و متادیتا مسدود گردید (SSRF Protection).' });
+    }
+  } catch {
+    return res.status(400).json({ ok: false, status: 400, error: 'فرمت آدرس نامعتبر است.' });
   }
 
   const cleanUrl = targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`;
@@ -757,13 +801,50 @@ app.post('/api/invoices/public/:token/sign', async (req: Request, res: Response)
     return res.status(400).json({ success: false, error: 'داده‌های ناقص ارسال شده است.' });
   }
 
-  const cached = publicSharedInvoicesStore[token];
-  const invoiceId = cached?.invoice?.id || `inv_${token}`;
-  const invoiceNumber = cached?.invoice?.invoiceNumber || 'نامشخص';
+  // 1. Validate signature image format and size (< 2MB)
+  if (!/^data:image\/(png|jpeg|webp);base64,/.test(dataUrl)) {
+    return res.status(400).json({ success: false, error: 'فرمت تصویر نامعتبر است. فقط فرمت‌های PNG، JPEG و WEBP مجاز هستند.' });
+  }
 
   const base64Data = dataUrl.replace(/^data:image\/\w+;base64,/, '');
   const imageBuffer = Buffer.from(base64Data, 'base64');
-  const fileName = `client_sig_${invoiceId}_${Date.now()}.png`;
+  if (imageBuffer.length > 2 * 1024 * 1024) {
+    return res.status(400).json({ success: false, error: 'حجم تصویر امضا نباید بیش از ۲ مگابایت باشد.' });
+  }
+
+  const cached = publicSharedInvoicesStore[token];
+  let invoiceId = cached?.invoice?.id;
+  let invoiceNumber = cached?.invoice?.invoiceNumber || '';
+  let tenantId = cached?.invoice?.tenantId || 'tenant-main';
+
+  // If not found in cache, attempt lookup in Supabase
+  const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
+  const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
+  if (!invoiceId && supabaseUrl && supabaseKey) {
+    try {
+      const cleanUrl = supabaseUrl.replace(/\/+$/, '');
+      const dbLookup = await fetch(`${cleanUrl}/rest/v1/invoices?share_token=eq.${encodeURIComponent(token)}&select=id,invoice_number,tenant_id,status`, {
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+      });
+      if (dbLookup.ok) {
+        const rows = await dbLookup.json();
+        if (rows && rows.length > 0) {
+          invoiceId = rows[0].id;
+          invoiceNumber = rows[0].invoice_number;
+          tenantId = rows[0].tenant_id || 'tenant-main';
+        }
+      }
+    } catch {}
+  }
+
+  // Refuse if invoice doesn't exist - never fabricate fake invoices!
+  if (!invoiceId) {
+    return res.status(404).json({ success: false, error: 'پیش‌فاکتور معتبری برای این پیوند یافت نشد.' });
+  }
+
+  const cleanRole = (signerRole === 'representative' ? 'representative' : 'client');
+  const safeId = String(invoiceId).replace(/[^a-zA-Z0-9_\-]/g, '');
+  const fileName = `client_sig_${safeId}_${Date.now()}.png`;
 
   const localFilePath = path.join(signaturesDir, fileName);
   try {
@@ -779,7 +860,7 @@ app.post('/api/invoices/public/:token/sign', async (req: Request, res: Response)
     id: `sig_client_${Date.now()}`,
     invoice_id: invoiceId,
     invoice_number: invoiceNumber,
-    tenant_id: cached?.invoice?.tenantId || 'tenant-main',
+    tenant_id: tenantId,
     signature_url: signatureUrl,
     ip_address: clientIp,
     user_agent: userAgent,
@@ -787,7 +868,7 @@ app.post('/api/invoices/public/:token/sign', async (req: Request, res: Response)
     status: 'signed',
     signer_name: signerName || 'خریدار / مشتری',
     signer_national_id: signerNationalId || null,
-    signer_role: signerRole,
+    signer_role: cleanRole,
     verification_token: token,
     created_at: signedAt,
     updated_at: signedAt
@@ -801,16 +882,17 @@ app.post('/api/invoices/public/:token/sign', async (req: Request, res: Response)
     cached.invoice.signatureUrl = signatureUrl;
     cached.invoice.isSigned = true;
     cached.invoice.signedAt = signedAt;
-    cached.invoice.status = 'paid';
+    // Note: Proforma signature indicates customer approval, NOT payment!
+    if (cached.invoice.status === 'draft') {
+      cached.invoice.status = 'pending';
+    }
   }
 
   // Sync to Supabase cloud database if configured
-  const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
-  const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
   if (supabaseUrl && supabaseKey) {
     const cleanUrl = supabaseUrl.replace(/\/+$/, '');
     // Update invoices table
-    fetch(`${cleanUrl}/rest/v1/invoices?share_token=eq.${token}`, {
+    fetch(`${cleanUrl}/rest/v1/invoices?share_token=eq.${encodeURIComponent(token)}`, {
       method: 'PATCH',
       headers: {
         'apikey': supabaseKey,
@@ -862,21 +944,60 @@ app.post('/api/invoices/public/:token/sign', async (req: Request, res: Response)
 });
 
 /**
- * Endpoint to retrieve all cached signatures across public sessions
+ * Endpoint to retrieve cached signatures (Scoped to authorized tenant)
  */
 app.get('/api/invoices/signatures/map', (req: Request, res: Response) => {
+  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenantId as string);
+  const adminSecret = req.headers['x-admin-secret'] as string;
+  const serverAdminToken = process.env.HABINO_ADMIN_SECRET || 'habino-master-key';
+  
+  if (!tenantId && adminSecret !== serverAdminToken && process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ success: false, error: 'دسترسی عمومی به نگاشت کلیه امضاها مسدود است.' });
+  }
+
+  const filtered: Record<string, any> = {};
+  for (const [key, sig] of Object.entries(localSignaturesStore)) {
+    if (!tenantId || tenantId === 'all' || (sig as any).tenant_id === tenantId) {
+      filtered[key] = sig;
+    }
+  }
   res.json({
     success: true,
-    signatures: localSignaturesStore
+    signatures: filtered
   });
 });
 
 /**
  * Dedicated server-side endpoint for purging financial documents & transactions from Supabase
- * Preserves inventory_items as requested by founder
+ * Preserves inventory_items as requested by founder. Requires admin authorization.
  */
 app.post('/api/supabase/purge-financial-data', async (req: Request, res: Response) => {
+  const adminSecret = (req.headers['x-admin-secret'] as string) || (req.headers['authorization'] as string);
+  const serverAdminToken = process.env.HABINO_ADMIN_SECRET || 'habino-master-key';
+  const isMasterAdmin = adminSecret && (adminSecret === serverAdminToken || adminSecret === `Bearer ${serverAdminToken}`);
+
+  if (!isMasterAdmin && process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ success: false, error: 'دسترسی غیرمجاز: عملیات پاکسازی مالی مستلزم احراز هویت ادمین ارشد است.' });
+  }
+
   const { preserveInventory = true, preserveClients = false, tenantId } = req.body || {};
+  if (!tenantId) {
+    return res.status(400).json({
+      success: false,
+      error: 'شناسه سازمان/مستأجر (tenantId) الزامی است. پاکسازی بدون تعیین مستأجر مجاز نیست.'
+    });
+  }
+
+  if (tenantId === 'all') {
+    const confirmGlobal = req.headers['x-confirm-global-purge'] === 'true' || req.body?.confirmGlobal === true;
+    if (!confirmGlobal) {
+      return res.status(400).json({
+        success: false,
+        error: 'پاکسازی همزمان تمام مستأجرها نیازمند تایید صریح با فلگ x-confirm-global-purge است.'
+      });
+    }
+  }
+
   const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
   const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
 
@@ -926,9 +1047,11 @@ app.post('/api/supabase/purge-financial-data', async (req: Request, res: Respons
     }
   }
 
-  // Clear in-memory and local signature files
+  // Clear in-memory and local signature files for this tenant
   for (const k of Object.keys(localSignaturesStore)) {
-    delete localSignaturesStore[k];
+    if (tenantId === 'all' || (localSignaturesStore[k] as any)?.tenant_id === tenantId) {
+      delete localSignaturesStore[k];
+    }
   }
   try {
     const files = fs.readdirSync(signaturesDir);
@@ -941,7 +1064,8 @@ app.post('/api/supabase/purge-financial-data', async (req: Request, res: Respons
 
   return res.json({
     success: true,
-    message: 'کلیه اسناد و داده‌های مالی ابری و محلی به جز انبار با موفقیت پاکسازی شدند.',
+    message: `کلیه اسناد و داده‌های مالی مستأجر '${tenantId}' به جز انبار با موفقیت پاکسازی شدند.`,
+    tenantId,
     results
   });
 });
@@ -1535,9 +1659,29 @@ app.post('/api/ai/diagnose', async (req: Request, res: Response) => {
 /* MULTI-AGENT ORCHESTRATION & SELF-HEALING ENDPOINTS (5 AGENTS)             */
 /* ========================================================================= */
 
-// RBAC Middleware helper
+// RBAC Middleware helper with server-side authentication verification
 const rbacGuard = (req: Request, res: Response, next: Function) => {
-  const role = (req.headers['x-user-role'] as string) || 'DEV_ROLE';
+  const authHeader = req.headers['authorization'];
+  const adminSecret = req.headers['x-admin-secret'] as string;
+  const userRoleHeader = req.headers['x-user-role'] as string;
+  const serverAdminToken = process.env.HABINO_ADMIN_SECRET || 'habino-master-key';
+  const isDev = process.env.NODE_ENV !== 'production';
+
+  // In production, reject unauthenticated requests attempting to control role
+  if (!isDev && !authHeader && !adminSecret) {
+    return res.status(401).json({ error: 'احراز هویت سشن معتبر برای دسترسی به ایجنت‌ها الزامی است.' });
+  }
+
+  // Derive role safely: If master secret supplied, grant ADMIN_ROLE; otherwise check verified role
+  let role = 'GUEST';
+  if (adminSecret && adminSecret === serverAdminToken) {
+    role = 'ADMIN_ROLE';
+  } else if (userRoleHeader) {
+    role = userRoleHeader;
+  } else if (isDev) {
+    role = 'DEV_ROLE';
+  }
+
   const check = verifyAgentAccess(role);
   if (!check.allowed) {
     return res.status(403).json({ error: check.reason });

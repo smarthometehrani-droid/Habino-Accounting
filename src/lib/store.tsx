@@ -1229,6 +1229,11 @@ export const AccountingProvider: React.FC<{ children: ReactNode }> = ({ children
       throw new Error('سند موردنظر یافت نشد.');
     }
 
+    const isProforma = deletedInv.type === 'proforma' || deletedInv.type === 'proforma_sale' || deletedInv.type === 'proforma_purchase';
+    if (!isProforma) {
+      throw new Error('خطای عدم توجیه قانونی: طبق قوانین مالیاتی و استانداردهای حسابداری، حذف فاکتورهای ثبت‌شده در دفاتر مالی غیرمجاز و غیرموجه است. فاکتورهای صادره دارای شماره سریال و آثار زنجیره‌ای در کاردکس کالا و تراز مالی هستند. جهت تعدیل، از صدور فاکتور برگشت از فروش/خرید یا سند اصلاحی استفاده فرمایید.');
+    }
+
     const currentSnapshot = {
       invoices: financialStateRef.current.invoices,
       accountingEntries: financialStateRef.current.accountingEntries,

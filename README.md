@@ -1,20 +1,68 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# سامانه حسابداری هابینو (Habino Accounting)
 
-# Run and deploy your AI Studio app
+سامانه جامع مدیریت مالی، حسابداری دوبل استاندارد، صدور فاکتور رسمی، چک صیادی و هوش تحلیلی سیناپس ویژه ارائه‌دهندگان خدمات و کسب‌وکارهای مدرن.
 
-This contains everything you need to run your app locally.
+---
 
-View your app in AI Studio: https://ai.studio/apps/0e78e330-aba2-4e84-bada-202c9c8be3cf
+## ۱. پیش‌نیازها و نصب سیستم
 
-## Run Locally
+- **Node.js**: نسخه 20 به بالا
+- **مدیر بسته**: `npm` یا `bun`
 
-**Prerequisites:**  Node.js
+### مراحل راه‌اندازی:
+```bash
+# ۱. نصب وابستگی‌ها
+npm install
 
+# ۲. ایجاد فایل متغیرهای محیطی
+cp .env.example .env
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+# ۳. اجرای محیط توسعه
+npm run dev
+```
+
+---
+
+## ۲. متغیرهای محیطی (Environment Variables)
+
+| متغیر | نوع | توضیحات |
+| :--- | :--- | :--- |
+| `VITE_SUPABASE_URL` | اختیاری | آدرس پروژه پایگاه‌داده Supabase (PostgreSQL 15+) |
+| `VITE_SUPABASE_ANON_KEY` | اختیاری | کلید احراز هویت عمومی سوپابیس جهت کلاینت |
+| `GEMINI_API_KEY` | اختیاری | کلید دسترسی به مدل‌های تحلیل صوتی و پیش‌بینی سیناپس |
+| `HABINO_ADMIN_SECRET` | اختیاری | توکن امنیتی اختصاصی ادمین جهت عملیات حساسی چون Purge |
+
+*نکته:* سیستم دارای قابلیت کامل **Offline-First** است و در صورت عدم اتصال به سوپابیس، تمام داده‌ها به صورت خودکار و ایمن در IndexedDB و حافظه محلی مدیریت می‌شوند.
+
+---
+
+## ۳. دستورات اجرایی پروژه (Scripts)
+
+```bash
+# اجرای سرور توسعه همراه با Vite و Express
+npm run dev
+
+# اعتبارسنجی استاتیک تایپ‌ها
+npm run lint
+
+# اجرای سوئیت تست خودکار ۲۴ سناریوی دوبل و تراز آزمایشی ۶ ستونی
+npm run test:accounting
+
+# بیلد نهایی کلاینت و سرور
+npm run build
+
+# اجرای سرور پروداکشن
+npm start
+```
+
+---
+
+## ۴. ساختار معماری و امنیت (Security & Architecture)
+
+- **ایزولاسیون چندمستأجری (Multi-Tenancy):** کلیه داده‌های مالی بر اساس فیلد `tenant_id` تفکیک شده و پالیسی‌های RLS در سوپابیس مانع از هرگونه نشت اطلاعات بین سازمان‌ها می‌شوند.
+- **اصول ۹‌گانه مالی:**
+  1. الزام وجود طرف‌حساب (مخاطب) در ثبت اسناد.
+  2. پروژه صرفاً برچسب ارزیابی است و حساب دفتر کل مجزا ندارد.
+  3. توازن قطعی دفاتر دوبل (بدهکار = بستانکار با اختلاف صفر ریال).
+  4. منع قانونی حذف فاکتورهای رسمی و قطعی ثبت‌شده در دفاتر (تعدیل از طریق فاکتور برگشت یا سند اصلاحی).
+- **لایه اشتراک امن پیش‌فاکتور:** اشتراک‌گذاری عمومی و امضای آنلاین مشتری تنها از طریق توکن اختصاصی رمزنگاری‌شده (`share_token`) و توابع امن RPC سمت دیتابیس صورت می‌پذیرد.

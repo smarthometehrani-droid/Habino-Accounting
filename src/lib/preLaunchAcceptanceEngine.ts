@@ -13,6 +13,7 @@ import { TaxpayerEngine, validateVerhoeffChecksum } from './taxpayerEngine';
 import { EscPosPrinterEngine } from './escPosPrinterEngine';
 import { validateInvoiceClientId } from '../components/Invoices';
 import { HabinoOfflineQueue } from './offlineQueueEngine';
+import { AccountingAutomatedTestEngine } from './accountingAutomatedTestEngine';
 
 // ==========================================
 // ۱. تایپ‌ها و ساختار داده آزمون خودکار هوش مصنوعی
@@ -474,23 +475,28 @@ export class PreLaunchAcceptanceEngine {
     this.purgeInvalidAndTestInvoices();
 
     // بررسی اسناد ثبت شده برای اطمینان از نداشتن طرف‌حساب خالی (اسناد قطعی و رسمی حسابداری)
-    const orphanClientInvoices = context.invoices.filter(inv => {
-      if (inv.is_deleted || inv.status === 'cancelled') return false;
+    const activeInvoices = (context.invoices || []).filter(inv => !inv.is_deleted && inv.status !== 'cancelled');
+    const orphanClientInvoices = activeInvoices.filter(inv => {
       const isProforma = inv.type === 'proforma' || inv.type === 'proforma_sale' || inv.type === 'proforma_purchase';
       if (isProforma) return false;
       const cid = inv.clientId || inv.client_id;
       if (cid === 'client-inquiry-neutral') return false;
       return !cid || String(cid).trim() === '' || cid === 'null' || cid === 'undefined';
     });
-    const orphanClientEntries = context.accountingEntries.filter(
-      entry => entry.ruleCode === 'RULE_1_MANDATORY_CONTACT' && (!entry.partyId || String(entry.partyId).trim() === '' || entry.partyId === 'null')
-    );
+
+    const orphanClientEntries = (context.accountingEntries || []).filter(entry => {
+      // Only accounts that track customer/vendor debit/credit (103/201) mandate party identification
+      const isPartyAccount = entry.accountCode?.startsWith('103') || entry.accountCode?.startsWith('201') || entry.ruleCode === 'RULE_1_MANDATORY_CONTACT';
+      if (!isPartyAccount) return false;
+      const cid = entry.clientId || (entry as any).partyId || (entry as any).client_id;
+      return !cid || String(cid).trim() === '' || cid === 'null' || cid === 'undefined';
+    });
 
     if (orphanClientInvoices.length > 0 || orphanClientEntries.length > 0) {
       t1Passed = false;
       t1Details = `خطای نقض قانون ۱: تعداد ${orphanClientInvoices.length} فاکتور و ${orphanClientEntries.length} سند بدون طرف‌حساب یافت شد.`;
     } else {
-      t1Details = `تطابق ۱۰۰٪: کلیه ${context.invoices.length} فاکتور موجود دارای طرف‌حساب معتبر هستند و گیت امنیتی فعال است.`;
+      t1Details = `تطابق ۱۰۰٪: کلیه ${activeInvoices.length} فاکتور موجود دارای طرف‌حساب معتبر هستند و گیت امنیتی فعال است.`;
     }
 
     results.push({
@@ -790,6 +796,39 @@ export class PreLaunchAcceptanceEngine {
       executionTimeMs: Math.round(performance.now() - t11Start),
       outputDetails: 'سرویس‌ورکر و حافظه کش استاتیک فعال هستند: فونت وزیرمتن و بسته‌های آیکون برای حالت آفلاین مطلق پیکربندی شده‌اند.',
       diagnosticAdvice: undefined
+    });
+
+    // ----------------------------------------------------
+    // آزمون ۱۲: ممیزی خودکار جامع تمام انواع فاکتور، مرجوعی، انبار، تسویه کارفرما و ۳۲ سناریوی همبسته
+    // ----------------------------------------------------
+    const t12Start = performance.now();
+    let t12Passed = true;
+    let t12Details = '';
+    try {
+      const suiteResult = AccountingAutomatedTestEngine.runAllScenarios();
+      if (suiteResult.failedScenarios > 0 || !suiteResult.allTrialBalancesBalanced || suiteResult.totalDiscrepancyRial !== 0) {
+        t12Passed = false;
+        t12Details = `خطا در ممیزی جامع: تعداد ${suiteResult.failedScenarios} سناریو ناموفق یا انحراف ${suiteResult.totalDiscrepancyRial} ریال در تراز ۶ ستونی!`;
+      } else {
+        t12Details = `تطابق ۱۰۰٪ ریاضی و حسابداری: کلیه ${suiteResult.totalScenarios} سناریو (انواع فاکتور، مرجوعی، کاردکس انبار، سقف اعتبار، تسویه کارفرما، تنخواه و حقوق) با انحراف ۰ ریال تایید شدند. گردش کل: ${suiteResult.totalDebitSum.toLocaleString('fa-IR')} ریال.`;
+      }
+    } catch (err: unknown) {
+      t12Passed = false;
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      t12Details = `خطای استثنا در اجرای سناریوهای خودکار: ${errorMsg}`;
+    }
+
+    results.push({
+      id: 'ai-all-invoices-and-hybrid-scenarios',
+      category: 'nine_accounting_rules',
+      categoryFa: 'اصول ۹‌گانه مالی و سناریوهای ترکیبی',
+      title: 'ممیزی جامع خودکار انواع فاکتور، مرجوعی‌ها، کاردکس انبار، سقف اعتبار و ۳۲ سناریوی ترکیبی',
+      ruleReference: 'دستورالعمل دائمی - اصول ۹‌گانه ثبت اسناد و استانداردهای دوبل هابینو',
+      assertion: 'کلیه انواع فاکتورها، فاکتورهای برگشتی، انبارداری و کاردکس، تسویه کارفرما و حقوق دستمزد باید با ۰ ریال انحراف در تراز ۶ ستونی اعتبارسنجی شوند.',
+      status: t12Passed ? 'passed' : 'failed',
+      executionTimeMs: Math.round(performance.now() - t12Start),
+      outputDetails: t12Details,
+      diagnosticAdvice: t12Passed ? undefined : 'سناریوهای AccountingAutomatedTestEngine و ماژول‌های فاکتور را بازبینی فرمایید.'
     });
 
     // جمع‌بندی نهایی

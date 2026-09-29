@@ -20,6 +20,7 @@ import {
   Invoice, 
   Project, 
   Check, 
+  InventoryItem,
   TrialBalanceColumnMode, 
   TrialBalanceLevel,
   TrialBalanceRow
@@ -27,6 +28,7 @@ import {
 import { HabinoAccountingKernel } from './accountingKernel';
 import { computeMultiColumnTrialBalance, MultiColumnTrialBalanceResult } from './trialBalanceEngine';
 import { toBaseCurrency, BASE_FINANCIAL_CURRENCY, IRT_TO_IRR_MULTIPLIER } from './currencyUtils';
+import { AccountingScenariosExtended } from './accountingScenariosExtended';
 
 /**
  * تولید هش یکتا و همگام برای گواهی ممیزی حسابداری
@@ -47,8 +49,10 @@ function generateSyncAuditHash(input: string): string {
 
 export type AccountingTestCategory = 
   | 'document_registration'   // ثبت سند حسابداری
+  | 'invoice_and_returns'    // انواع فاکتور و مرجوعی‌ها
   | 'project_accounting'     // پروژه‌ها، دریافت و پرداخت‌ها و تنخواه
   | 'payroll_and_salary'     // حقوق، دستمزد، بیمه و مالیات
+  | 'inventory_and_clients'  // انبارداری، کاردکس کالا و مخاطبین
   | 'cross_module_hybrid'    // سناریوهای تلفیقی و زنجیره‌ای
   | 'trial_balance'          // تراز آزمایشی
   | 'ledger_turnover'        // گردش حساب در دفتر کل
@@ -4316,8 +4320,18 @@ export class AccountingAutomatedTestEngine {
     };
   }
 
+  // سناریوهای ۲۵ تا ۳۲ (ارجاع به موتور سناریوهای گسترش‌یافته هابینو)
+  public static runScenario25_AllInvoiceTypesComprehensiveLifecycle = AccountingScenariosExtended.runScenario25_AllInvoiceTypesComprehensiveLifecycle;
+  public static runScenario26_ReturnsLifecycleAndInventoryReversal = AccountingScenariosExtended.runScenario26_ReturnsLifecycleAndInventoryReversal;
+  public static runScenario27_ProjectTurnkeyFinalSettlementAndRetentionRelease = AccountingScenariosExtended.runScenario27_ProjectTurnkeyFinalSettlementAndRetentionRelease;
+  public static runScenario28_ImprestPettyCashFullCycleAndReplenishment = AccountingScenariosExtended.runScenario28_ImprestPettyCashFullCycleAndReplenishment;
+  public static runScenario29_PayrollHybridAdvanceLoanBonusAndPayaSettlement = AccountingScenariosExtended.runScenario29_PayrollHybridAdvanceLoanBonusAndPayaSettlement;
+  public static runScenario30_InventoryWarehouseCardexAndNegativeStockGuard = AccountingScenariosExtended.runScenario30_InventoryWarehouseCardexAndNegativeStockGuard;
+  public static runScenario31_ClientCreditLimitAndRiskExposureAudit = AccountingScenariosExtended.runScenario31_ClientCreditLimitAndRiskExposureAudit;
+  public static runScenario32_MasterEndToEndEcosystemStressAndGrandTrial = AccountingScenariosExtended.runScenario32_MasterEndToEndEcosystemStressAndGrandTrial;
+
   /**
-   * اجرای جامع و یکپارچه تمام سناریوهای آزمون خودکار حسابداری (کلیه ۲۴ سناریو)
+   * اجرای جامع و یکپارچه تمام سناریوهای آزمون خودکار حسابداری (کلیه ۳۲ سناریو)
    */
   public static runAllScenarios(): AccountingTestSuiteSummary {
     const suiteStartTime = performance.now();
@@ -4407,6 +4421,28 @@ export class AccountingAutomatedTestEngine {
     const sc23 = this.runScenario23_ProjectJointVenturesProfitSharing();
     scenarios.push(sc23);
 
+    // سناریوهای ۲۵ تا ۳۲: ماژول‌های تکمیلی فاکتورها، مرجوعی، تسویه کارفرما، تنخواه، حقوق، انبار و مخاطبین
+    const sc25 = AccountingScenariosExtended.runScenario25_AllInvoiceTypesComprehensiveLifecycle();
+    scenarios.push(sc25);
+
+    const sc26 = AccountingScenariosExtended.runScenario26_ReturnsLifecycleAndInventoryReversal();
+    scenarios.push(sc26);
+
+    const sc27 = AccountingScenariosExtended.runScenario27_ProjectTurnkeyFinalSettlementAndRetentionRelease();
+    scenarios.push(sc27);
+
+    const sc28 = AccountingScenariosExtended.runScenario28_ImprestPettyCashFullCycleAndReplenishment();
+    scenarios.push(sc28);
+
+    const sc29 = AccountingScenariosExtended.runScenario29_PayrollHybridAdvanceLoanBonusAndPayaSettlement();
+    scenarios.push(sc29);
+
+    const sc30 = AccountingScenariosExtended.runScenario30_InventoryWarehouseCardexAndNegativeStockGuard();
+    scenarios.push(sc30);
+
+    const sc31 = AccountingScenariosExtended.runScenario31_ClientCreditLimitAndRiskExposureAudit();
+    scenarios.push(sc31);
+
     // تجمیع کلیه آرتیکل‌های معتبر دوبل برای سناریوهای تراز آزمایشی و گردش حساب دفتر کل
     const accumulatedEntries: AccountingEntry[] = [
       ...sc1.simulatedEntries,
@@ -4425,7 +4461,14 @@ export class AccountingAutomatedTestEngine {
       ...sc20.simulatedEntries,
       ...sc21.simulatedEntries,
       ...sc22.simulatedEntries,
-      ...sc23.simulatedEntries
+      ...sc23.simulatedEntries,
+      ...sc25.simulatedEntries,
+      ...sc26.simulatedEntries,
+      ...sc27.simulatedEntries,
+      ...sc28.simulatedEntries,
+      ...sc29.simulatedEntries,
+      ...sc30.simulatedEntries,
+      ...sc31.simulatedEntries
     ];
 
     // سناریوی ۶: تراز آزمایشی ۲، ۴ و ۶ ستونی
@@ -4440,6 +4483,10 @@ export class AccountingAutomatedTestEngine {
     const sc24 = this.runScenario24_ComprehensiveMasterTrialBalanceStress(accumulatedEntries);
     scenarios.push(sc24);
 
+    // سناریوی ۳۲: ممیزی کلان نهایی اکوسیستم هابینو با ۳۲ سناریو
+    const sc32 = AccountingScenariosExtended.runScenario32_MasterEndToEndEcosystemStressAndGrandTrial(accumulatedEntries);
+    scenarios.push(sc32);
+
     const suiteDuration = Math.round(performance.now() - suiteStartTime);
     const passedCount = scenarios.filter(s => s.status === 'passed').length;
     const failedCount = scenarios.filter(s => s.status === 'failed').length;
@@ -4453,7 +4500,7 @@ export class AccountingAutomatedTestEngine {
     });
 
     const totalDiscrepancy = Math.abs(totalDebitSum - totalCreditSum);
-    const allTrialBalanced = sc6.status === 'passed' && sc24.status === 'passed' && totalDiscrepancy === 0;
+    const allTrialBalanced = sc6.status === 'passed' && sc24.status === 'passed' && sc32.status === 'passed' && totalDiscrepancy === 0;
 
     // ایجاد امضا و شناسه اعتبارسنجی
     const certString = `HABINO_ACCOUNTING_AUDIT_${passedCount}/${scenarios.length}_${totalDebitSum}_${Date.now()}`;

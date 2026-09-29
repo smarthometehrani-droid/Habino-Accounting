@@ -437,9 +437,11 @@ export const AccountingVerificationStudio: React.FC<AccountingVerificationStudio
                   دسته‌بندی:
                 </span>
                 {[
-                  { id: 'all', label: 'همه سناریوها (۲۴ سناریو)' },
-                  { id: 'project_accounting', label: 'پروژه‌ها و دریافت/پرداخت' },
-                  { id: 'payroll_and_salary', label: 'حقوق، دستمزد و بیمه' },
+                  { id: 'all', label: 'همه سناریوها (۳۲ سناریو)' },
+                  { id: 'invoice_and_returns', label: 'انواع فاکتور و مرجوعی' },
+                  { id: 'project_accounting', label: 'پروژه‌ها و تسویه کارفرما' },
+                  { id: 'payroll_and_salary', label: 'حقوق، دستمزد و مساعده' },
+                  { id: 'inventory_and_clients', label: 'انبارداری و سقف اعتبار مخاطبین' },
                   { id: 'cross_module_hybrid', label: 'سناریوهای تلفیقی و زنجیره‌ای' },
                   { id: 'document_registration', label: 'ثبت سند حسابداری' },
                   { id: 'trial_balance', label: 'تراز آزمایشی' },
