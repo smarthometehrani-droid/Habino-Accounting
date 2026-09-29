@@ -148,6 +148,21 @@ assert(checksOnConflictTenant, {
     : 'خطا: شرط tenant_id در ON CONFLICT تعبیه نشده است!'
 });
 
+// 2.3.1 Atomic Verification of UPSERT Outcome before any ledger mutation
+const checksUpsertReturningOutcome = rpcRegisterDef.includes('RETURNING id INTO v_upserted_id') &&
+  rpcRegisterDef.includes('IF v_upserted_id IS NULL THEN') &&
+  rpcRegisterDef.includes('TENANT_MISMATCH_UPSERT_BLOCKED');
+
+assert(checksUpsertReturningOutcome, {
+  id: 'SEC-04-C2',
+  name: 'کنترل نتیجه UPSERT با RETURNING و توقف پیش از تغییر دفتر در صورت تداخل مستأجر',
+  testNature: 'STATIC_SQL_AUDIT',
+  category: 'RPC_SECURITY',
+  message: checksUpsertReturningOutcome
+    ? 'تایید شد: نتیجه UPSERT فاکتور با RETURNING اعتبارسنجی شده و در صورت مسدود شدن، قبل از هرگونه حذف یا درج در دفتر کل متوقف می‌گردد.'
+    : 'خطا: نتیجه UPSERT با RETURNING بررسی نشده و احتمال تغییر ناخواسته دفتر کل وجود دارد!'
+});
+
 // 2.4 Scoped Ledger Rebuild (Prevent cross-tenant deletion)
 const checksScopedLedgerDelete = rpcRegisterDef.includes('WHERE tenant_id = v_effective_tenant') &&
   rpcRegisterDef.includes('DELETE FROM public.accounting_entries');

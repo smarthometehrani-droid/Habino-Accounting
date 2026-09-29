@@ -2,11 +2,12 @@
  * HABINO ACCOUNTING - PRODUCTION & STAGING MIGRATION AUDITOR & DEPLOYER
  * 
  * Rules Enforced:
- * 1. Safe URL display (Masked secrets & keys).
- * 2. Production Protection Guard (Rule 4: Staging/Local first, Production requires Founder confirmation).
- * 3. NO fake HTTP calls (PostgREST /rest/v1/rpc does not accept raw DDL).
- * 4. Clear distinction: Static file verification vs Live PostgreSQL deployment.
- * 5. Migration-safe, idempotent SQL validation.
+ * 1. Safe URL display (Masked secrets, passwords & keys).
+ * 2. Multi-Vector Production Protection Guard (Rule 4: Staging/Local first, Production requires explicit Founder confirmation with host binding).
+ * 3. Ambiguous Target Guard: If destination cannot be verified, abort immediately.
+ * 4. Cross-Platform Portable psql check without 'which psql'.
+ * 5. Pre-flight connection test before applying migrations.
+ * 6. Migration-safe, idempotent SQL validation and verified exit codes.
  */
 
 import fs from 'fs';
@@ -20,7 +21,13 @@ interface MigrationItemCheck {
   details: string;
 }
 
-function maskUrl(url: string): string {
+function maskSecret(secret?: string): string {
+  if (!secret) return '(تنظیم نشده)';
+  if (secret.length <= 8) return '********';
+  return `${secret.substring(0, 4)}***${secret.substring(secret.length - 4)}`;
+}
+
+function maskHttpUrl(url: string): string {
   if (!url) return '(تنظیم نشده - حالت شبیه‌ساز محلی)';
   try {
     const u = new URL(url);
@@ -34,32 +41,125 @@ function maskUrl(url: string): string {
   }
 }
 
+function maskPostgresConnString(connStr: string): string {
+  if (!connStr) return '(تنظیم نشده)';
+  try {
+    // Attempt standard URL parse
+    const u = new URL(connStr);
+    const host = u.hostname || 'unknown-host';
+    const port = u.port || '5432';
+    const dbname = u.pathname || '';
+    const maskedHost = host.length > 8 ? `${host.substring(0, 4)}***${host.substring(host.indexOf('.'))}` : host;
+    return `postgres://***:***@${maskedHost}:${port}${dbname}`;
+  } catch {
+    // Regex fallback
+    return connStr.replace(/:(\/\/[^:]+):([^@]+)@/, '://$1:***@').substring(0, 25) + '***';
+  }
+}
+
+function isPsqlAvailable(): boolean {
+  try {
+    // Portable across Linux, macOS, and Windows without relying on 'which'
+    execSync('psql --version', { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isRemoteProductionHost(hostOrUrl: string): boolean {
+  if (!hostOrUrl) return false;
+  const lower = hostOrUrl.toLowerCase();
+  
+  // Local/Loopback patterns are safe non-production
+  if (
+    lower.includes('localhost') ||
+    lower.includes('127.0.0.1') ||
+    lower.includes('0.0.0.0') ||
+    lower.includes('host.docker.internal') ||
+    lower.includes('.staging.') ||
+    lower.includes('-staging-')
+  ) {
+    return false;
+  }
+
+  // Known cloud/production identifiers
+  if (
+    lower.includes('supabase.co') ||
+    lower.includes('rds.amazonaws.com') ||
+    lower.includes('cloudsql') ||
+    lower.includes('neon.tech') ||
+    lower.includes('elephantsql.com')
+  ) {
+    return true;
+  }
+
+  // Any non-local domain with standard TLD
+  if (/\.[a-z]{2,}(:\d+)?$/i.test(lower)) {
+    return true;
+  }
+
+  return false;
+}
+
 async function runMigrationPipeline() {
   console.log('\n================================================================================');
   console.log('🚀 HABINO ACCOUNTING - SUPABASE MIGRATION VERIFIER & PIPELINE');
   console.log('================================================================================\n');
 
-  const rawUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
+  const supabaseRestUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
+  const postgresConnUrl = process.env.DATABASE_URL || process.env.SUPABASE_DB_URL || '';
   const hasServiceKey = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
   const hasAnonKey = Boolean(process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY);
-  const dbUrl = process.env.DATABASE_URL || process.env.SUPABASE_DB_URL || '';
+  
   const isApplyRequested = process.argv.includes('--apply') || process.env.APPLY_MIGRATION === 'true';
-  const isFounderConfirmed = process.argv.includes('--confirm-production-deployment-by-farid-tehrani');
 
-  const isProductionTarget = rawUrl.includes('supabase.co') && !rawUrl.includes('localhost') && !rawUrl.includes('127.0.0.1');
+  // Founder confirmation flag can be: --confirm-production-deployment-by-farid-tehrani=<host>
+  const founderConfirmArg = process.argv.find(arg => arg.startsWith('--confirm-production-deployment-by-farid-tehrani'));
+  const founderTargetValue = founderConfirmArg ? founderConfirmArg.split('=')[1]?.trim() : null;
 
-  console.log(`📡 پایگاه داده هدف:   ${maskUrl(rawUrl)}`);
-  console.log(`🔒 کلید سرویس:       ${hasServiceKey ? 'موجود در محیط (سطح دسترسی ادمین - محرمانه)' : 'تنظیم نشده (فقط بازرسی محلی)'}`);
-  console.log(`🔑 کلید کلاینت:       ${hasAnonKey ? 'موجود' : 'تنظیم نشده'}`);
-  console.log(`⚙️  حالت عملیات:       ${isApplyRequested ? 'درخواست استقرار (--apply)' : 'بازرسی و اعتبارسنجی ساختاری'}\n`);
+  // Extract hostnames for security audits
+  let restHost = '';
+  try { if (supabaseRestUrl) restHost = new URL(supabaseRestUrl).host; } catch {}
 
-  // RULE 4: Production Protection Check
-  if (isProductionTarget && isApplyRequested && !isFounderConfirmed) {
-    console.error('\x1b[41m\x1b[1m 🛑 توقف اضطراری (Rule 4 Violation Prevention): \x1b[0m');
-    console.error('مایگریشن مستقیم روی پایگاه‌داده Production بدون تأیید صریح بنیانگذار (مهندس فرید تهرانی) اکیداً ممنوع است.');
-    console.error('جهت استقرار در محیط تست/لوکال، ابتدا داکر محلی را استفاده نمایید.');
-    console.error('برای استقرار Production، فلگ --confirm-production-deployment-by-farid-tehrani الزامی است.\n');
-    process.exit(1);
+  let dbHost = '';
+  try { if (postgresConnUrl) dbHost = new URL(postgresConnUrl).host; } catch {}
+
+  const isRestProduction = isRemoteProductionHost(restHost);
+  const isDbProduction = isRemoteProductionHost(dbHost);
+  const isProductionTarget = isRestProduction || isDbProduction;
+
+  console.log(`📡 نشانی REST سوپابیس:     ${maskHttpUrl(supabaseRestUrl)}`);
+  console.log(`🗄️  نشانی پایگاه داده (SQL): ${maskPostgresConnString(postgresConnUrl)}`);
+  console.log(`🔒 کلید سرویس:              ${hasServiceKey ? 'موجود در محیط (سطح دسترسی ادمین - محرمانه)' : 'تنظیم نشده (فقط بازرسی محلی)'}`);
+  console.log(`🔑 کلید کلاینت:              ${hasAnonKey ? 'موجود' : 'تنظیم نشده'}`);
+  console.log(`⚙️  حالت عملیات:              ${isApplyRequested ? 'درخواست استقرار (--apply)' : 'بازرسی و اعتبارسنجی ساختاری'}\n`);
+
+  // GUARD 1: Ambiguous Target Check when apply is requested
+  if (isApplyRequested) {
+    if (!postgresConnUrl && !supabaseRestUrl) {
+      console.error('\x1b[41m\x1b[1m 🛑 توقف عملیات: مقصد پایگاه‌داده قابل تشخیص نیست. \x1b[0m');
+      console.error('برای اعمال مایگریشن، تنظیم صریح DATABASE_URL یا SUPABASE_DB_URL الزامی است.');
+      console.error('مقصد مبهم هرگز مجوزی برای اجرا صادر نمی‌کند.\n');
+      process.exit(1);
+    }
+  }
+
+  // GUARD 2: Rule 4 Production Protection Check
+  if (isProductionTarget && isApplyRequested) {
+    const activeTargetHost = dbHost || restHost;
+    const isExplicitlyConfirmed = Boolean(
+      founderTargetValue && (founderTargetValue === activeTargetHost || activeTargetHost.includes(founderTargetValue))
+    );
+
+    if (!isExplicitlyConfirmed) {
+      console.error('\x1b[41m\x1b[1m 🛑 توقف اضطراری (Rule 4 Production Protection): \x1b[0m');
+      console.error('مایگریشن مستقیم روی پایگاه‌داده Production بدون تأیید صریح بنیانگذار (مهندس فرید تهرانی) اکیداً ممنوع است.');
+      console.error(`مقصد شناسایی‌شده به عنوان پروداکشن: ${activeTargetHost.substring(0, 4)}***`);
+      console.error('صرف وجود فلگ عمومی بدون قید دقیق نام میزبان مقصد کافی نیست.');
+      console.error(`دستور صحیح: --confirm-production-deployment-by-farid-tehrani=${activeTargetHost.substring(0, 8)}...\n`);
+      process.exit(1);
+    }
   }
 
   const migrationsDir = path.join(process.cwd(), 'supabase', 'migrations');
@@ -97,10 +197,12 @@ async function runMigrationPipeline() {
     },
     {
       id: 'MIG-03',
-      name: 'گارد ضد جعل مستأجر و حفاظت در برابر Race Condition در RPC اتمیک',
+      name: 'گارد ضد جعل مستأجر، شرط ON CONFLICT و کنترل خروجی با RETURNING در RPC اتمیک',
       status: hardeningSql.includes('TENANT_MISMATCH_INVOICE_EXISTS') &&
-              hardeningSql.includes('WHERE invoices.tenant_id = v_effective_tenant') ? 'VERIFIED' : 'PENDING',
-      details: 'بررسی عدم تعلق فاکتور به مستأجر دیگر و اعمال شرط حفاظت مستأجر در ON CONFLICT جهت امنیت در برابر race condition.'
+              hardeningSql.includes('WHERE invoices.tenant_id = v_effective_tenant') &&
+              hardeningSql.includes('RETURNING id INTO v_upserted_id') &&
+              hardeningSql.includes('TENANT_MISMATCH_UPSERT_BLOCKED') ? 'VERIFIED' : 'PENDING',
+      details: 'بررسی عدم تعلق فاکتور به مستأجر دیگر، شرط حفاظت در ON CONFLICT و بررسی اتمیک خروجی RETURNING قبل از هرگونه تغییر در دفتر کل.'
     },
     {
       id: 'MIG-04',
@@ -150,17 +252,38 @@ async function runMigrationPipeline() {
   }
 
   // Live execution handling (Only via standard psql / Supabase DB connection if provided)
-  if (isApplyRequested && dbUrl) {
-    console.log('\n📡 در حال تلاش برای اعمال مایگریشن روی پایگاه داده از طریق اتصال امن PostgreSQL (psql)...');
-    try {
-      execSync(`which psql`, { stdio: 'ignore' });
-      execSync(`psql "${dbUrl}" -f "${hardeningFile}"`, { stdio: 'inherit' });
-      execSync(`psql "${dbUrl}" -f "${occFile}"`, { stdio: 'inherit' });
-      console.log('\n✅ مایگریشن‌ها با موفقیت روی پایگاه‌داده هدف مستقر گردیدند.');
-    } catch (e: any) {
-      console.error('\n❌ خطا در اعمال مایگریشن از طریق اتصال PostgreSQL:', e.message);
+  if (isApplyRequested && postgresConnUrl) {
+    console.log('\n📡 در حال بررسی ابزار اتصال PostgreSQL (psql)...');
+    if (!isPsqlAvailable()) {
+      console.error('❌ ابزار psql در مسیر سیستم (PATH) یافت نشد.');
+      console.error('جهت استقرار خودکار مایگریشن‌ها، کلاینت PostgreSQL (psql) یا Supabase CLI الزامی است.');
       process.exit(1);
     }
+
+    // Pre-flight connection test
+    console.log('🔌 آزمون برقراری ارتباط با پایگاه‌داده...');
+    try {
+      execSync(`psql "${postgresConnUrl}" -c "SELECT 1;"`, { stdio: 'pipe' });
+      console.log('✔ ارتباط با پایگاه‌داده با موفقیت برقرار شد.');
+    } catch (connErr: any) {
+      console.error('❌ خطا در برقراری ارتباط اولیه با پایگاه‌داده:', connErr.message);
+      process.exit(1);
+    }
+
+    console.log('\n🚀 در حال اعمال مایگریشن‌ها به ترتیب تاریخی:');
+    for (const file of migrationFiles) {
+      const fullPath = path.join(migrationsDir, file);
+      console.log(`   ⏳ در حال اجرای: ${file}...`);
+      try {
+        execSync(`psql "${postgresConnUrl}" -f "${fullPath}"`, { stdio: 'pipe' });
+        console.log(`   ✔ موفق: ${file}`);
+      } catch (applyErr: any) {
+        console.error(`   ❌ شکست در اجرای مایگریشن ${file}:`, applyErr.message);
+        process.exit(1);
+      }
+    }
+
+    console.log('\n✅ کلیه مایگریشن‌ها با موفقیت ۱۰۰٪ روی پایگاه‌داده هدف مستقر گردیدند.');
   } else {
     console.log('\n📋 وضعیت اجرا: [حالت بازرسی استاتیک و راهنمای استقرار دستی]');
     console.log('نکته مهم: درخواست خام HTTP به /rest/v1/rpc یک متد معتبر DDL نیست. ارسال درخواست جعلی حذف شد.');

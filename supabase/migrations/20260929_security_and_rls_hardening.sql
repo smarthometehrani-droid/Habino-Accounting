@@ -469,6 +469,7 @@ DECLARE
     v_entry_credit NUMERIC;
     v_entry_acc_code TEXT;
     v_entry_ref_id TEXT;
+    v_upserted_id UUID := NULL;
 BEGIN
     -- --------------------------------------------------------------------------
     -- 1. SECURITY & TENANT AUTHORIZATION CHECK (Server-Side Verified Claims)
@@ -728,7 +729,19 @@ BEGIN
         notes = EXCLUDED.notes,
         terms = EXCLUDED.terms,
         updated_at = NOW()
-    WHERE invoices.tenant_id = v_effective_tenant; -- Atomic race-condition protection!
+    WHERE invoices.tenant_id = v_effective_tenant -- Atomic race-condition protection!
+    RETURNING id INTO v_upserted_id;
+
+    -- CRITICAL CHECK: Verify UPSERT actually affected a row
+    -- If a conflict occurred with another tenant's row, the WHERE clause skipped the update,
+    -- leaving v_upserted_id as NULL. We MUST reject immediately before deleting or inserting any ledger rows!
+    IF v_upserted_id IS NULL THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'errorCode', 'TENANT_MISMATCH_UPSERT_BLOCKED',
+            'error', 'خطای امنیتی: به‌روزرسانی فاکتور به دلیل عدم تطابق شناسه مستأجر مسدود گردید. هیچ تغییری در دفتر کل اعمال نشد.'
+        );
+    END IF;
 
     -- Atomic Ledger Rebuild:
     -- Restricted to caller's verified tenant and exact reference of this invoice

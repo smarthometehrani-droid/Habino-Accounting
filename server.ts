@@ -858,25 +858,18 @@ app.post('/api/invoices/public/:token/sign', async (req: Request, res: Response)
     updated_at: signedAt
   };
 
-  localSignaturesStore[token] = signatureRecord;
-  if (invoiceId) {
-    localSignaturesStore[invoiceId] = signatureRecord;
-  }
-  if (cached && cached.invoice) {
-    cached.invoice.signatureUrl = signatureUrl;
-    cached.invoice.isSigned = true;
-    cached.invoice.signedAt = signedAt;
-    // Note: Proforma signature indicates customer approval, NOT payment!
-    if (cached.invoice.status === 'draft') {
-      cached.invoice.status = 'pending';
-    }
-  }
-
   // Sync to Supabase cloud database via secure RPC submit_public_invoice_signature
+  let cloudSyncStatus: 'synced' | 'queued_offline' | 'local_only' = 'local_only';
+  let cloudErrorMsg: string | null = null;
+  let isBusinessRejection = false;
+
   if (supabaseUrl && supabaseKey) {
     const cleanUrl = supabaseUrl.replace(/\/+$/, '');
     try {
-      await fetch(`${cleanUrl}/rest/v1/rpc/submit_public_invoice_signature`, {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 7000);
+
+      const rpcRes = await fetch(`${cleanUrl}/rest/v1/rpc/submit_public_invoice_signature`, {
         method: 'POST',
         headers: {
           'apikey': supabaseKey,
@@ -891,18 +884,94 @@ app.post('/api/invoices/public/:token/sign', async (req: Request, res: Response)
           p_signer_national_id: signerNationalId || null,
           p_ip_address: clientIp,
           p_user_agent: userAgent
-        })
+        }),
+        signal: controller.signal
       });
-    } catch (rpcErr) {
-      console.warn('[Supabase Public Signature RPC Error]', rpcErr);
+      clearTimeout(timeoutId);
+
+      if (!rpcRes.ok) {
+        const errorText = await rpcRes.text().catch(() => 'Unknown HTTP error');
+        cloudErrorMsg = `HTTP_${rpcRes.status}: ${errorText.substring(0, 120)}`;
+        const maskedToken = token.length > 8 ? `${token.substring(0, 4)}***${token.slice(-4)}` : '***';
+        console.warn(`[Public Signature RPC] Non-2xx response (${rpcRes.status}) for token ${maskedToken}`);
+        if (rpcRes.status >= 400 && rpcRes.status < 500) {
+          isBusinessRejection = true;
+        }
+      } else {
+        let rpcJson: any = null;
+        try {
+          rpcJson = await rpcRes.json();
+        } catch {
+          cloudErrorMsg = 'INVALID_JSON_RESPONSE';
+        }
+
+        if (rpcJson && rpcJson.success === true) {
+          cloudSyncStatus = 'synced';
+        } else {
+          cloudErrorMsg = rpcJson?.error || 'خطا در تایید امضا توسط پایگاه‌داده';
+          isBusinessRejection = true;
+        }
+      }
+    } catch (rpcErr: any) {
+      cloudErrorMsg = rpcErr.name === 'AbortError' ? 'TIMEOUT' : 'NETWORK_ERROR';
+      const maskedToken = token.length > 8 ? `${token.substring(0, 4)}***${token.slice(-4)}` : '***';
+      console.warn(`[Public Signature RPC] Network failure for token ${maskedToken}: ${cloudErrorMsg}`);
     }
+  }
+
+  // Handle business rejections (e.g. invalid token, deleted invoice, invalid role)
+  if (isBusinessRejection) {
+    return res.status(400).json({
+      success: false,
+      cloudSync: false,
+      error: cloudErrorMsg || 'ثبت امضا در پایگاه داده مورد تایید قرار نگرفت.'
+    });
+  }
+
+  // Always update local cache & store for valid signatures (synced, queued, or local-only)
+  localSignaturesStore[token] = signatureRecord;
+  if (invoiceId) {
+    localSignaturesStore[invoiceId] = signatureRecord;
+  }
+  if (cached && cached.invoice) {
+    cached.invoice.signatureUrl = signatureUrl;
+    cached.invoice.isSigned = true;
+    cached.invoice.signedAt = signedAt;
+    // Note: Proforma signature indicates customer approval, NOT payment!
+    if (cached.invoice.status === 'draft') {
+      cached.invoice.status = 'pending';
+    }
+  }
+
+  if (cloudSyncStatus === 'synced') {
+    return res.json({
+      success: true,
+      cloudSync: true,
+      status: 'synced',
+      signatureRecord,
+      signatureUrl,
+      message: 'امضا و تاییدیه پیش‌فاکتور با موفقیت در پایگاه داده ابری ثبت گردید.'
+    });
+  }
+
+  if (supabaseUrl && supabaseKey && (cloudErrorMsg === 'TIMEOUT' || cloudErrorMsg === 'NETWORK_ERROR' || cloudErrorMsg?.startsWith('HTTP_5'))) {
+    return res.status(202).json({
+      success: true,
+      cloudSync: false,
+      status: 'queued_offline',
+      signatureRecord,
+      signatureUrl,
+      message: 'امضا به صورت محلی ذخیره گردید و در صف ارسال قرار گرفت (در انتظار همگام‌سازی ابری).'
+    });
   }
 
   return res.json({
     success: true,
+    cloudSync: false,
+    status: 'local_only',
     signatureRecord,
     signatureUrl,
-    message: 'امضا و تاییدیه پیش‌فاکتور با موفقیت در سامانه ثبت گردید.'
+    message: 'امضا در حافظه محلی سیستم ثبت گردید (محیط محلی بدون اتصال ابری).'
   });
 });
 
