@@ -632,42 +632,27 @@ app.post('/api/invoices/signatures/upload', async (req: Request, res: Response) 
     localSignaturesStore[invoiceId] = signatureRecord;
     localSignaturesStore[shareToken] = signatureRecord;
 
-    // 3. Sync to Supabase Database if available
+    // 3. Sync to Supabase Database via secure token-bound RPC if available
     if (supabaseUrl && supabaseKey) {
       try {
         const cleanUrl = supabaseUrl.replace(/\/+$/, '');
-        // Insert signature record
-        await fetch(`${cleanUrl}/rest/v1/invoice_signatures`, {
+        // Submit signature via secure token-bound RPC
+        await fetch(`${cleanUrl}/rest/v1/rpc/submit_public_invoice_signature`, {
           method: 'POST',
-          headers: {
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'resolution=merge-duplicates'
-          },
-          body: JSON.stringify(signatureRecord)
-        });
-
-        // Update invoice record status
-        await fetch(`${cleanUrl}/rest/v1/invoices?id=eq.${invoiceId}`, {
-          method: 'PATCH',
           headers: {
             'apikey': supabaseKey,
             'Authorization': `Bearer ${supabaseKey}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            signature_url: finalSignatureUrl,
-            is_signed: true,
-            signed_at: signedAt,
-            share_token: shareToken,
-            signer_info: {
-              signerName,
-              signerRole,
-              signerNationalId,
-              signatureId,
-              signedAt
-            }
+            p_token: shareToken,
+            p_signature_url: finalSignatureUrl,
+            p_signer_name: signerName || 'صادرکننده مجاز',
+            p_signer_role: signerRole,
+            p_signer_national_id: signerNationalId || null,
+            p_signature_hash: signatureHash,
+            p_ip_address: clientIp,
+            p_user_agent: userAgent
           })
         });
       } catch (dbErr) {

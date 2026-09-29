@@ -1,22 +1,55 @@
 -- ==============================================================================
--- HABINO ACCOUNTING - PRODUCTION HARDENING & RLS ISOLATION MIGRATION (V2)
+-- HABINO ACCOUNTING - PRODUCTION HARDENING & MULTI-TENANT RLS ISOLATION (V3)
 -- Migration: 20260929_security_and_rls_hardening.sql
 -- Target Database: Supabase PostgreSQL 15+
--- Description: 
+-- Description:
 --   1. Zero-Trust current_tenant_id() (NO fallback to 'tenant-main', returns NULL for anon).
---   2. Drop ALL legacy permissive policies (including invoices_permissive_sync_policy USING (true)).
---   3. Strict authenticated tenant isolation on financial tables (Zero anon table access).
---   4. Cryptographically bound public invoice viewing & signature RPCs.
---   5. ACID atomic invoice registration RPC with caller tenant enforcement, Rule 1 (Mandatory Contact)
---      and Rule 9 (Double-entry balance) validation directly inside PostgreSQL.
+--   2. Explicit is_super_admin() helper based on server-verified JWT claims.
+--   3. Complete purge of legacy permissive policies across ALL multi-tenant tables.
+--   4. Rebuilding strict tenant-scoped RLS policies on all financial & system tables:
+--      (invoices, invoice_signatures, clients, checks, transactions, accounting_entries,
+--       installments, bank_accounts, projects, inventory_items, company_settings, licenses, backups).
+--   5. Cryptographically bound public invoice viewing & signature RPCs.
+--   6. Hardened ACID atomic invoice registration RPC:
+--      - Anti-spoofing via verified JWT claims
+--      - Cross-tenant invoice hijacking protection (verifies existing invoice tenant)
+--      - ON CONFLICT with tenant_id guard against race conditions
+--      - Scoped ledger deletion (prevents deleting another tenant's entries)
+--      - Draft vs definitive invoice validation
+--      - Rule 1 (Mandatory Contact) and Rule 9 (Double-entry balance) enforcement.
 -- ==============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- ==============================================================================
--- 1. HARDEN current_tenant_id() FUNCTION (Eliminate dangerous default fallback)
+-- 1. HELPER FUNCTIONS: is_super_admin() & current_tenant_id()
 -- ==============================================================================
+
+-- 1.1 Verified Super-Admin helper (Checks verified JWT claims)
+CREATE OR REPLACE FUNCTION public.is_super_admin()
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF auth.role() <> 'authenticated' THEN
+        RETURN FALSE;
+    END IF;
+    RETURN COALESCE(
+        (auth.jwt() -> 'app_metadata' ->> 'role') = 'super_admin',
+        (auth.jwt() ->> 'role') = 'super_admin',
+        FALSE
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.is_super_admin() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.is_super_admin() TO anon, authenticated, service_role;
+
+-- 1.2 Zero-Trust current_tenant_id() (Never defaults to 'tenant-main', returns NULL for anon)
 DROP FUNCTION IF EXISTS public.current_tenant_id() CASCADE;
 
 CREATE OR REPLACE FUNCTION public.current_tenant_id() 
@@ -29,16 +62,16 @@ AS $$
 DECLARE
     v_tenant TEXT;
 BEGIN
-    -- 1. Anonymous requests NEVER have a tenant context - strictly return NULL
+    -- Anonymous requests NEVER have a tenant context - strictly return NULL
     IF auth.role() = 'anon' THEN
         RETURN NULL;
     END IF;
 
-    -- 2. Authenticated requests: extract tenant claim from verified JWT or session setting
+    -- Authenticated requests: extract tenant claim from verified JWT or session setting
     v_tenant := COALESCE(
-        NULLIF(current_setting('app.current_tenant_id', true), ''),
         NULLIF(auth.jwt() -> 'app_metadata' ->> 'tenant_id', ''),
         NULLIF(auth.jwt() ->> 'tenant_id', ''),
+        NULLIF(current_setting('app.current_tenant_id', true), ''),
         NULLIF((current_setting('request.jwt.claims', true)::jsonb -> 'app_metadata' ->> 'tenant_id'), '')
     );
     
@@ -51,20 +84,48 @@ REVOKE ALL ON FUNCTION public.current_tenant_id() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.current_tenant_id() TO anon, authenticated, service_role;
 
 -- ==============================================================================
--- 2. PURGE ALL INSECURE & PERMISSIVE POLICIES ACROSS FINANCIAL TABLES
+-- 2. PURGE ALL INSECURE & PERMISSIVE POLICIES ACROSS ALL FINANCIAL TABLES
 -- ==============================================================================
--- Drop dangerous USING (true) policies from old migrations that bypass RLS
+-- Invoices & Signatures
 DROP POLICY IF EXISTS "invoices_permissive_sync_policy" ON public.invoices;
 DROP POLICY IF EXISTS "company_settings_permissive_access" ON public.company_settings;
+DROP POLICY IF EXISTS "company_settings_public_access" ON public.company_settings;
+DROP POLICY IF EXISTS "company_settings_tenant_all" ON public.company_settings;
 DROP POLICY IF EXISTS "Public can view invoice with valid share token" ON public.invoices;
 DROP POLICY IF EXISTS "allow_anon_invoices" ON public.invoices;
 DROP POLICY IF EXISTS "allow_all_invoices" ON public.invoices;
 DROP POLICY IF EXISTS "allow_anon_all" ON public.invoices;
+
+-- Financial Tables
 DROP POLICY IF EXISTS "allow_all_accounting_entries" ON public.accounting_entries;
 DROP POLICY IF EXISTS "allow_anon_entries" ON public.accounting_entries;
 DROP POLICY IF EXISTS "allow_anon_checks" ON public.checks;
 DROP POLICY IF EXISTS "allow_anon_transactions" ON public.transactions;
 DROP POLICY IF EXISTS "allow_anon_clients" ON public.clients;
+DROP POLICY IF EXISTS "allow_anon_installments" ON public.installments;
+DROP POLICY IF EXISTS "allow_anon_bank_accounts" ON public.bank_accounts;
+DROP POLICY IF EXISTS "allow_anon_projects" ON public.projects;
+DROP POLICY IF EXISTS "allow_anon_inventory_items" ON public.inventory_items;
+
+-- Drop generic "Public access policy on *" and "Public policy on *"
+DO $$
+DECLARE
+    tbl text;
+    pol text;
+    tables text[] := ARRAY[
+        'invoices', 'invoice_signatures', 'clients', 'checks', 'transactions', 
+        'accounting_entries', 'installments', 'bank_accounts', 'projects', 
+        'inventory_items', 'company_settings', 'licenses', 'backups'
+    ];
+BEGIN
+    FOREACH tbl IN ARRAY tables LOOP
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = tbl) THEN
+            EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I;', 'Public access policy on ' || tbl, tbl);
+            EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I;', 'Public policy on ' || tbl, tbl);
+            EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I;', 'Tenant isolation policy on ' || tbl, tbl);
+        END IF;
+    END LOOP;
+END $$;
 
 -- Drop legacy signature policies
 DROP POLICY IF EXISTS "Vendors can view signatures in their tenant" ON public.invoice_signatures;
@@ -74,102 +135,82 @@ DROP POLICY IF EXISTS "Vendors can delete signatures in their tenant" ON public.
 DROP POLICY IF EXISTS "Public can view verified signature via token" ON public.invoice_signatures;
 DROP POLICY IF EXISTS "Clients can submit signature via valid invoice token" ON public.invoice_signatures;
 
--- Drop previous tenant policies to recreate clean strict ones
-DROP POLICY IF EXISTS "tenant_isolation_invoices_select" ON public.invoices;
-DROP POLICY IF EXISTS "tenant_isolation_invoices_insert" ON public.invoices;
-DROP POLICY IF EXISTS "tenant_isolation_invoices_update" ON public.invoices;
-DROP POLICY IF EXISTS "tenant_isolation_invoices_delete" ON public.invoices;
-
 -- ==============================================================================
--- 3. ENFORCE STRICT ROW LEVEL SECURITY (RLS) ON INVOICES & SIGNATURES
+-- 3. REBUILD STRICT TENANT-SCOPED RLS POLICIES ACROSS ALL MULTI-TENANT TABLES
 -- ==============================================================================
-ALTER TABLE public.invoices ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.invoices FORCE ROW LEVEL SECURITY;
+DO $$
+DECLARE
+    tbl text;
+    tables text[] := ARRAY[
+        'invoices', 'invoice_signatures', 'clients', 'checks', 'transactions', 
+        'accounting_entries', 'installments', 'bank_accounts', 'projects', 
+        'inventory_items', 'company_settings', 'licenses', 'backups'
+    ];
+BEGIN
+    FOREACH tbl IN ARRAY tables LOOP
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = tbl) THEN
+            -- Enable and Force RLS
+            EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY;', tbl);
+            EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY;', tbl);
 
-ALTER TABLE public.invoice_signatures ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.invoice_signatures FORCE ROW LEVEL SECURITY;
+            -- Drop old isolation policies
+            EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I;', 'tenant_isolation_' || tbl || '_select', tbl);
+            EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I;', 'tenant_isolation_' || tbl || '_insert', tbl);
+            EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I;', 'tenant_isolation_' || tbl || '_update', tbl);
+            EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I;', 'tenant_isolation_' || tbl || '_delete', tbl);
 
--- INVOICES: Strictly authenticated tenant access (Zero anon access to raw table)
-CREATE POLICY "tenant_isolation_invoices_select"
-    ON public.invoices FOR SELECT
-    USING (
-        auth.role() = 'authenticated' AND (
-            tenant_id = public.current_tenant_id()
-            OR public.current_tenant_id() = 'tenant-master-admin'
-            OR public.current_tenant_id() = 'all'
-        )
-    );
+            -- SELECT Policy (Strictly Authenticated Tenant OR Super-Admin)
+            EXECUTE format('
+                CREATE POLICY %I ON public.%I FOR SELECT
+                USING (
+                    auth.role() = ''authenticated'' AND (
+                        tenant_id = public.current_tenant_id()
+                        OR public.is_super_admin()
+                    )
+                );
+            ', 'tenant_isolation_' || tbl || '_select', tbl);
 
-CREATE POLICY "tenant_isolation_invoices_insert"
-    ON public.invoices FOR INSERT
-    WITH CHECK (
-        auth.role() = 'authenticated' AND (
-            tenant_id = public.current_tenant_id()
-            OR public.current_tenant_id() = 'tenant-master-admin'
-            OR public.current_tenant_id() = 'all'
-        )
-    );
+            -- INSERT Policy (Strictly Authenticated Tenant OR Super-Admin with matching WITH CHECK)
+            EXECUTE format('
+                CREATE POLICY %I ON public.%I FOR INSERT
+                WITH CHECK (
+                    auth.role() = ''authenticated'' AND (
+                        tenant_id = public.current_tenant_id()
+                        OR public.is_super_admin()
+                    )
+                );
+            ', 'tenant_isolation_' || tbl || '_insert', tbl);
 
-CREATE POLICY "tenant_isolation_invoices_update"
-    ON public.invoices FOR UPDATE
-    USING (
-        auth.role() = 'authenticated' AND (
-            tenant_id = public.current_tenant_id()
-            OR public.current_tenant_id() = 'tenant-master-admin'
-            OR public.current_tenant_id() = 'all'
-        )
-    );
+            -- UPDATE Policy (Strictly Authenticated Tenant OR Super-Admin with matching WITH CHECK)
+            EXECUTE format('
+                CREATE POLICY %I ON public.%I FOR UPDATE
+                USING (
+                    auth.role() = ''authenticated'' AND (
+                        tenant_id = public.current_tenant_id()
+                        OR public.is_super_admin()
+                    )
+                )
+                WITH CHECK (
+                    auth.role() = ''authenticated'' AND (
+                        tenant_id = public.current_tenant_id()
+                        OR public.is_super_admin()
+                    )
+                );
+            ', 'tenant_isolation_' || tbl || '_update', tbl);
 
-CREATE POLICY "tenant_isolation_invoices_delete"
-    ON public.invoices FOR DELETE
-    USING (
-        auth.role() = 'authenticated' AND (
-            tenant_id = public.current_tenant_id()
-            OR public.current_tenant_id() = 'tenant-master-admin'
-            OR public.current_tenant_id() = 'all'
-        )
-    );
-
--- INVOICE_SIGNATURES: Strictly authenticated tenant access
-CREATE POLICY "tenant_isolation_signatures_select"
-    ON public.invoice_signatures FOR SELECT
-    USING (
-        auth.role() = 'authenticated' AND (
-            tenant_id = public.current_tenant_id()
-            OR public.current_tenant_id() = 'tenant-master-admin'
-            OR public.current_tenant_id() = 'all'
-        )
-    );
-
-CREATE POLICY "tenant_isolation_signatures_insert"
-    ON public.invoice_signatures FOR INSERT
-    WITH CHECK (
-        auth.role() = 'authenticated' AND (
-            tenant_id = public.current_tenant_id()
-            OR public.current_tenant_id() = 'tenant-master-admin'
-            OR public.current_tenant_id() = 'all'
-        )
-    );
-
-CREATE POLICY "tenant_isolation_signatures_update"
-    ON public.invoice_signatures FOR UPDATE
-    USING (
-        auth.role() = 'authenticated' AND (
-            tenant_id = public.current_tenant_id()
-            OR public.current_tenant_id() = 'tenant-master-admin'
-            OR public.current_tenant_id() = 'all'
-        )
-    );
-
-CREATE POLICY "tenant_isolation_signatures_delete"
-    ON public.invoice_signatures FOR DELETE
-    USING (
-        auth.role() = 'authenticated' AND (
-            tenant_id = public.current_tenant_id()
-            OR public.current_tenant_id() = 'tenant-master-admin'
-            OR public.current_tenant_id() = 'all'
-        )
-    );
+            -- DELETE Policy (Strictly Authenticated Tenant OR Super-Admin)
+            EXECUTE format('
+                CREATE POLICY %I ON public.%I FOR DELETE
+                USING (
+                    auth.role() = ''authenticated'' AND (
+                        tenant_id = public.current_tenant_id()
+                        OR public.is_super_admin()
+                    )
+                );
+            ', 'tenant_isolation_' || tbl || '_delete', tbl);
+        END IF;
+    END LOOP;
+END $$;
 
 -- ==============================================================================
 -- 4. SECURE TOKEN-BOUND RPC FOR PUBLIC INVOICE VIEWING
@@ -336,7 +377,7 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'error', 'پیش‌فاکتور معتبری برای این پیوند یافت نشد.');
     END IF;
 
-    -- Record signature with verified tenant_id derived from the invoice record
+    -- Record signature with verified tenant_id derived directly from the invoice record
     INSERT INTO public.invoice_signatures (
         id,
         invoice_id,
@@ -398,12 +439,12 @@ REVOKE ALL ON FUNCTION public.submit_public_invoice_signature(TEXT, TEXT, TEXT, 
 GRANT EXECUTE ON FUNCTION public.submit_public_invoice_signature(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) TO anon, authenticated, service_role;
 
 -- ==============================================================================
--- 6. HARDENED ATOMIC INVOICE REGISTRATION RPC (ACID, Rule 1, Rule 9, Caller Tenant Check)
+-- 6. HARDENED ATOMIC INVOICE REGISTRATION RPC (ACID, Anti-Hijacking, Rule 1 & Rule 9)
 -- ==============================================================================
 CREATE OR REPLACE FUNCTION public.rpc_register_invoice_atomic(
     p_invoice JSONB,
     p_entries JSONB DEFAULT '[]'::jsonb,
-    p_tenant_id TEXT DEFAULT 'tenant-main'
+    p_tenant_id TEXT DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -414,37 +455,79 @@ DECLARE
     v_inv_id UUID;
     v_entry JSONB;
     v_caller_tenant TEXT;
+    v_is_super_admin BOOLEAN := FALSE;
+    v_effective_tenant TEXT;
+    v_existing_tenant TEXT;
     v_client_id TEXT;
     v_inv_type TEXT;
+    v_inv_status TEXT;
     v_total_debit NUMERIC := 0;
     v_total_credit NUMERIC := 0;
     v_discrepancy NUMERIC := 0;
+    v_entry_count INT := 0;
+    v_entry_debit NUMERIC;
+    v_entry_credit NUMERIC;
+    v_entry_acc_code TEXT;
+    v_entry_ref_id TEXT;
 BEGIN
     -- --------------------------------------------------------------------------
-    -- 1. SECURITY & TENANT AUTHORIZATION CHECK
+    -- 1. SECURITY & TENANT AUTHORIZATION CHECK (Server-Side Verified Claims)
     -- --------------------------------------------------------------------------
     IF auth.role() = 'authenticated' THEN
-        v_caller_tenant := COALESCE(
-            auth.jwt() -> 'app_metadata' ->> 'tenant_id',
-            auth.jwt() ->> 'tenant_id'
+        -- Check verified super_admin role from JWT
+        v_is_super_admin := COALESCE(
+            (auth.jwt() -> 'app_metadata' ->> 'role') = 'super_admin',
+            (auth.jwt() ->> 'role') = 'super_admin',
+            FALSE
         );
-        IF v_caller_tenant IS NULL THEN
-            RETURN jsonb_build_object(
-                'success', false, 
-                'errorCode', 'AUTH_TENANT_MISSING',
-                'error', 'خطای احراز هویت: شناسه سازمان در توکن کاربر موجود نیست.'
-            );
-        END IF;
 
-        -- Prohibit cross-tenant injection unless super-admin
-        IF v_caller_tenant <> 'all' AND v_caller_tenant <> 'tenant-master-admin' AND v_caller_tenant <> p_tenant_id THEN
+        -- Extract verified tenant_id from JWT
+        v_caller_tenant := COALESCE(
+            NULLIF(auth.jwt() -> 'app_metadata' ->> 'tenant_id', ''),
+            NULLIF(auth.jwt() ->> 'tenant_id', '')
+        );
+
+        IF v_is_super_admin THEN
+            -- Super-admin must specify an explicit target tenant (cannot be empty, null, or generic 'all')
+            IF p_tenant_id IS NULL OR trim(p_tenant_id) = '' OR p_tenant_id = 'all' THEN
+                RETURN jsonb_build_object(
+                    'success', false,
+                    'errorCode', 'INVALID_TARGET_TENANT',
+                    'error', 'خطای راهبر ارشد: شناسه مستأجر هدف باید به طور صریح مشخص شود و مقدار عمومی مانند all مجاز نیست.'
+                );
+            END IF;
+            v_effective_tenant := p_tenant_id;
+        ELSE
+            -- Normal authenticated user: Must have valid tenant claim
+            IF v_caller_tenant IS NULL OR trim(v_caller_tenant) = '' THEN
+                RETURN jsonb_build_object(
+                    'success', false, 
+                    'errorCode', 'AUTH_TENANT_MISSING',
+                    'error', 'خطای احراز هویت: شناسه سازمان در توکن معتبر کاربر موجود نیست.'
+                );
+            END IF;
+
+            -- Target tenant parameter (if provided) MUST strictly match caller tenant
+            IF p_tenant_id IS NOT NULL AND trim(p_tenant_id) <> '' AND p_tenant_id <> v_caller_tenant THEN
+                RETURN jsonb_build_object(
+                    'success', false, 
+                    'errorCode', 'TENANT_MISMATCH',
+                    'error', 'دسترسی غیرمجاز: امکان ثبت سند برای سازمان یا مستأجر دیگر مجاز نمی‌باشد.'
+                );
+            END IF;
+            v_effective_tenant := v_caller_tenant;
+        END IF;
+    ELSIF auth.role() = 'service_role' THEN
+        -- Direct service role call (e.g. backend automated job): require explicit tenant
+        IF p_tenant_id IS NULL OR trim(p_tenant_id) = '' OR p_tenant_id = 'all' THEN
             RETURN jsonb_build_object(
                 'success', false, 
-                'errorCode', 'TENANT_MISMATCH',
-                'error', 'دسترسی غیرمجاز: امکان ثبت سند برای سازمان یا مستأجر دیگر مجاز نمی‌باشد.'
+                'errorCode', 'MISSING_TENANT_PARAM',
+                'error', 'درخواست مستقیم سیستمی نیازمند تعیین صریح شناسه مستأجر است.'
             );
         END IF;
-    ELSIF auth.role() <> 'service_role' THEN
+        v_effective_tenant := p_tenant_id;
+    ELSE
         RETURN jsonb_build_object(
             'success', false, 
             'errorCode', 'UNAUTHENTICATED',
@@ -453,16 +536,52 @@ BEGIN
     END IF;
 
     IF p_invoice IS NULL THEN
-        RETURN jsonb_build_object('success', false, 'error', 'اطلاعات فاکتور ارسال نشده است.');
+        RETURN jsonb_build_object(
+            'success', false,
+            'errorCode', 'INVALID_INVOICE_DATA',
+            'error', 'اطلاعات فاکتور ارسال نشده است.'
+        );
+    END IF;
+
+    -- Extract invoice ID
+    IF (p_invoice->>'id') IS NOT NULL AND trim(p_invoice->>'id') <> '' THEN
+        BEGIN
+            v_inv_id := (p_invoice->>'id')::uuid;
+        EXCEPTION WHEN OTHERS THEN
+            RETURN jsonb_build_object(
+                'success', false,
+                'errorCode', 'INVALID_UUID',
+                'error', 'شناسه فاکتور ساختار معتبر UUID ندارد.'
+            );
+        END;
+    ELSE
+        v_inv_id := gen_random_uuid();
     END IF;
 
     -- --------------------------------------------------------------------------
-    -- 2. ENFORCE RULE 1: MANDATORY CONTACT (الزام وجود طرف‌حساب)
+    -- 2. CROSS-TENANT INVOICE HIJACKING & RACE-CONDITION PROTECTION
     -- --------------------------------------------------------------------------
-    v_client_id := COALESCE(p_invoice->>'clientId', p_invoice->>'client_id');
-    v_inv_type := COALESCE(p_invoice->>'type', 'sale');
+    -- Check if invoice ID already exists in the database
+    SELECT tenant_id INTO v_existing_tenant 
+    FROM public.invoices 
+    WHERE id = v_inv_id;
 
-    -- Proforma inquiry can be neutral, but all commercial invoices MUST have client_id
+    IF v_existing_tenant IS NOT NULL AND v_existing_tenant <> v_effective_tenant THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'errorCode', 'TENANT_MISMATCH_INVOICE_EXISTS',
+            'error', 'خطای امنیتی: سند مالی با این شناسه متعلق به مستأجر دیگری است و هرگونه تغییر در آن مسدود است.'
+        );
+    END IF;
+
+    -- --------------------------------------------------------------------------
+    -- 3. ENFORCE RULE 1: MANDATORY CONTACT (الزام طرف‌حساب)
+    -- --------------------------------------------------------------------------
+    v_client_id := COALESCE(NULLIF(p_invoice->>'clientId', ''), NULLIF(p_invoice->>'client_id', ''));
+    v_inv_type := COALESCE(p_invoice->>'type', 'sale');
+    v_inv_status := COALESCE(p_invoice->>'status', 'pending');
+
+    -- Proforma inquiry can be neutral, but all commercial invoices MUST have a valid client_id
     IF v_inv_type NOT IN ('proforma', 'proforma_sale', 'proforma_purchase') THEN
         IF v_client_id IS NULL OR trim(v_client_id) = '' OR v_client_id = 'null' OR v_client_id = 'undefined' THEN
             RETURN jsonb_build_object(
@@ -474,22 +593,61 @@ BEGIN
     END IF;
 
     -- --------------------------------------------------------------------------
-    -- 3. ENFORCE RULE 9: DOUBLE-ENTRY BALANCE (توازن بدهکار = بستانکار در دفتر کل)
+    -- 4. DRAFT VS DEFINITIVE ACCOUNTING VALIDATION & RULE 9 (توازن دفاتر دوبل)
     -- --------------------------------------------------------------------------
-    IF p_entries IS NOT NULL AND jsonb_array_length(p_entries) > 0 THEN
+    v_entry_count := COALESCE(jsonb_array_length(p_entries), 0);
+
+    -- Commercial non-draft invoices MUST have ledger entries
+    IF v_inv_status <> 'draft' AND v_inv_type NOT IN ('proforma', 'proforma_sale', 'proforma_purchase') THEN
+        IF v_entry_count < 2 THEN
+            RETURN jsonb_build_object(
+                'success', false,
+                'errorCode', 'DEFINITIVE_INVOICE_REQUIRES_LEDGER_ENTRIES',
+                'error', 'ثبت قطعی فاکتور بدون ردیف‌های معتبر دفتر کل (حداقل دو ردیف بدهکار و بستانکار) مجاز نیست.'
+            );
+        END IF;
+    END IF;
+
+    -- Validate ledger rows and double-entry balance if entries provided
+    IF v_entry_count > 0 THEN
         FOR v_entry IN SELECT * FROM jsonb_array_elements(p_entries)
         LOOP
-            v_total_debit := v_total_debit + COALESCE((v_entry->>'debit')::numeric, 0);
-            v_total_credit := v_total_credit + COALESCE((v_entry->>'credit')::numeric, 0);
+            v_entry_debit := COALESCE((v_entry->>'debit')::numeric, 0);
+            v_entry_credit := COALESCE((v_entry->>'credit')::numeric, 0);
+            v_entry_acc_code := v_entry->>'accountCode';
+            v_entry_ref_id := COALESCE(v_entry->>'referenceId', v_entry->>'reference_id');
 
-            -- Validate entry account code
-            IF (v_entry->>'accountCode') IS NULL OR trim(v_entry->>'accountCode') = '' THEN
+            -- Numeric checks: no negative debit/credit, at least one must be positive
+            IF v_entry_debit < 0 OR v_entry_credit < 0 OR (v_entry_debit = 0 AND v_entry_credit = 0) THEN
+                RETURN jsonb_build_object(
+                    'success', false,
+                    'errorCode', 'INVALID_ENTRY_AMOUNTS',
+                    'error', 'مبالغ بدهکار و بستانکار در ردیف‌های دفتر کل نامعتبر است.'
+                );
+            END IF;
+
+            -- Account code check
+            IF v_entry_acc_code IS NULL OR trim(v_entry_acc_code) = '' THEN
                 RETURN jsonb_build_object(
                     'success', false,
                     'errorCode', 'MISSING_ACCOUNT_CODE',
                     'error', 'کد حساب در یکی از ردیف‌های دفتر کل مشخص نشده است.'
                 );
             END IF;
+
+            -- Reference integrity check: reference must match this invoice ID or number
+            IF v_entry_ref_id IS NOT NULL AND trim(v_entry_ref_id) <> '' AND 
+               v_entry_ref_id <> v_inv_id::text AND 
+               v_entry_ref_id <> (p_invoice->>'invoiceNumber') THEN
+                RETURN jsonb_build_object(
+                    'success', false,
+                    'errorCode', 'ENTRY_REFERENCE_MISMATCH',
+                    'error', 'مرجع ردیف دفتر کل با شناسه فاکتور تطابق ندارد.'
+                );
+            END IF;
+
+            v_total_debit := v_total_debit + v_entry_debit;
+            v_total_credit := v_total_credit + v_entry_credit;
         END LOOP;
 
         v_discrepancy := abs(v_total_debit - v_total_credit);
@@ -503,11 +661,9 @@ BEGIN
     END IF;
 
     -- --------------------------------------------------------------------------
-    -- 4. ATOMIC DATABASE PERSISTENCE
+    -- 5. ATOMIC PERSISTENCE (UPSERT & LEDGER REBUILD)
     -- --------------------------------------------------------------------------
-    v_inv_id := COALESCE((p_invoice->>'id')::uuid, gen_random_uuid());
-
-    -- Insert or update invoice
+    -- Insert or update invoice with strict ON CONFLICT WHERE tenant_id matches
     INSERT INTO public.invoices (
         id,
         tenant_id,
@@ -532,10 +688,10 @@ BEGIN
         updated_at
     ) VALUES (
         v_inv_id,
-        p_tenant_id,
+        v_effective_tenant,
         p_invoice->>'invoiceNumber',
         v_inv_type,
-        COALESCE(p_invoice->>'status', 'pending'),
+        v_inv_status,
         COALESCE(p_invoice->>'template', 'modern'),
         p_invoice->>'date',
         p_invoice->>'dueDate',
@@ -555,18 +711,32 @@ BEGIN
     )
     ON CONFLICT (id) DO UPDATE SET
         invoice_number = EXCLUDED.invoice_number,
+        type = EXCLUDED.type,
         status = EXCLUDED.status,
+        template = EXCLUDED.template,
+        date = EXCLUDED.date,
+        due_date = EXCLUDED.due_date,
         client_id = EXCLUDED.client_id,
         client_name = EXCLUDED.client_name,
         items = EXCLUDED.items,
+        subtotal = EXCLUDED.subtotal,
+        total_discount = EXCLUDED.total_discount,
+        total_tax = EXCLUDED.total_tax,
         grand_total = EXCLUDED.grand_total,
-        updated_at = NOW();
+        amount_paid = EXCLUDED.amount_paid,
+        remaining_amount = EXCLUDED.remaining_amount,
+        notes = EXCLUDED.notes,
+        terms = EXCLUDED.terms,
+        updated_at = NOW()
+    WHERE invoices.tenant_id = v_effective_tenant; -- Atomic race-condition protection!
 
-    -- Insert ledger entries atomically if provided
-    IF p_entries IS NOT NULL AND jsonb_array_length(p_entries) > 0 THEN
-        -- Remove existing entries for this invoice to guarantee idempotency and avoid duplicates
-        DELETE FROM public.accounting_entries WHERE reference_id = v_inv_id::text;
+    -- Atomic Ledger Rebuild:
+    -- Restricted to caller's verified tenant and exact reference of this invoice
+    DELETE FROM public.accounting_entries 
+    WHERE tenant_id = v_effective_tenant 
+      AND (reference_id = v_inv_id::text OR reference_id = (p_invoice->>'invoiceNumber'));
 
+    IF v_entry_count > 0 THEN
         FOR v_entry IN SELECT * FROM jsonb_array_elements(p_entries)
         LOOP
             INSERT INTO public.accounting_entries (
@@ -586,7 +756,7 @@ BEGIN
                 created_at
             ) VALUES (
                 COALESCE((v_entry->>'id')::uuid, gen_random_uuid()),
-                p_tenant_id,
+                v_effective_tenant, -- Always bound to verified tenant
                 COALESCE(v_entry->>'documentNumber', p_invoice->>'invoiceNumber'),
                 COALESCE(v_entry->>'date', p_invoice->>'date'),
                 COALESCE(v_entry->>'description', 'ثبت سند فاکتور #' || (p_invoice->>'invoiceNumber')),
@@ -597,7 +767,7 @@ BEGIN
                 COALESCE(v_entry->>'clientId', v_client_id),
                 COALESCE(v_entry->>'clientName', p_invoice->>'clientName'),
                 v_entry->>'projectTag',
-                v_inv_id::text,
+                v_inv_id::text, -- Strict verified reference
                 NOW()
             );
         END LOOP;
@@ -606,10 +776,10 @@ BEGIN
     RETURN jsonb_build_object(
         'success', true,
         'invoiceId', v_inv_id,
+        'tenantId', v_effective_tenant,
         'message', 'سند مالی و آرتیکل‌های دوبل با رعایت کامل توازن و اعتبارسنجی طرف‌حساب به صورت اتمیک ثبت شدند.'
     );
 EXCEPTION WHEN OTHERS THEN
-    -- Any unexpected SQL error triggers full rollback
     RETURN jsonb_build_object(
         'success', false,
         'errorCode', 'DB_TRANSACTION_ROLLBACK',
