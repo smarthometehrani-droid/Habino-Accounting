@@ -1,0 +1,131 @@
+version: '3.8'
+
+# ==============================================================================
+# HABINO ACCOUNTING - LOCAL SUPABASE DOCKER STACK (P2 INFRASTRUCTURE)
+# معماری پایگاه داده محلی سوپابیس جهت اجرای آفلاین، آزمون‌های خودکار و توسعه محلی
+# ==============================================================================
+
+networks:
+  habino-supabase-net:
+    driver: bridge
+
+volumes:
+  habino-db-data:
+    driver: local
+  habino-storage-data:
+    driver: local
+
+services:
+  # 1. PostgreSQL 15 Engine with Multi-Tenant RLS & OCC triggers
+  supabase-db:
+    image: supabase/postgres:15.1.1.78
+    container_name: habino-supabase-db
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "127.0.0.1", "-p", "5432"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-habino_local_secret_2026}
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      JWT_SECRET: ${JWT_SECRET:-habino-super-secret-jwt-token-with-minimum-32-chars-length}
+    volumes:
+      - habino-db-data:/var/lib/postgresql/data
+      - ./supabase/migrations:/docker-entrypoint-initdb.d:ro
+    networks:
+      - habino-supabase-net
+    restart: unless-stopped
+
+  # 2. PostgREST (RESTful API over PostgreSQL)
+  supabase-rest:
+    image: postgrest/postgrest:v12.0.1
+    container_name: habino-supabase-rest
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "54321:3000"
+    environment:
+      PGRST_DB_URI: postgres://postgres:${POSTGRES_PASSWORD:-habino_local_secret_2026}@supabase-db:5432/postgres
+      PGRST_DB_SCHEMAS: public,storage
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET:-habino-super-secret-jwt-token-with-minimum-32-chars-length}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+    networks:
+      - habino-supabase-net
+    restart: unless-stopped
+
+  # 3. GoTrue Auth Service
+  supabase-auth:
+    image: supabase/gotrue:v2.158.1
+    container_name: habino-supabase-auth
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    ports:
+      - "9999:9999"
+    environment:
+      GOTRUE_JWT_SECRET: ${JWT_SECRET:-habino-super-secret-jwt-token-with-minimum-32-chars-length}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-habino_local_secret_2026}@supabase-db:5432/postgres?sslmode=disable
+      GOTRUE_SITE_URL: http://localhost:3000
+      GOTRUE_URI_ALLOW_LIST: http://localhost:3000/*
+      GOTRUE_DISABLE_SIGNUP: "false"
+      API_EXTERNAL_URL: http://localhost:9999
+    networks:
+      - habino-supabase-net
+    restart: unless-stopped
+
+  # 4. Storage API for Invoices, Signatures & Backups
+  supabase-storage:
+    image: supabase/storage-api:v1.11.0
+    container_name: habino-supabase-storage
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+      supabase-rest:
+        condition: service_started
+    ports:
+      - "5000:5000"
+    environment:
+      ANON_KEY: ${ANON_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.dummy}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.dummy}
+      POSTGREST_URL: http://supabase-rest:3000
+      PGRST_JWT_SECRET: ${JWT_SECRET:-habino-super-secret-jwt-token-with-minimum-32-chars-length}
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-habino_local_secret_2026}@supabase-db:5432/postgres
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+    volumes:
+      - habino-storage-data:/var/lib/storage
+    networks:
+      - habino-supabase-net
+    restart: unless-stopped
+
+  # 5. Supabase Studio (Database Management GUI)
+  supabase-studio:
+    image: supabase/studio:20240729-fa84307
+    container_name: habino-supabase-studio
+    depends_on:
+      supabase-rest:
+        condition: service_started
+    ports:
+      - "54323:3000"
+    environment:
+      STUDIO_PG_META_URL: http://supabase-meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-habino_local_secret_2026}
+      SUPABASE_URL: http://supabase-kong:8000
+      SUPABASE_PUBLIC_URL: http://localhost:54321
+      SUPABASE_ANON_KEY: ${ANON_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.dummy}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.dummy}
+    networks:
+      - habino-supabase-net
+    restart: unless-stopped

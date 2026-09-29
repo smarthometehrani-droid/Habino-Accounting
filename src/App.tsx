@@ -2,23 +2,10 @@ import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { AccountingProvider, useAccounting } from './lib/store';
 import { SiraFlowProvider } from './lib/siraflowStore';
 import { Dashboard } from './components/Dashboard';
-import { Invoices } from './components/Invoices';
-import { Checks } from './components/Checks';
-import { Transactions } from './components/Transactions';
-import { Clients } from './components/Clients';
-import { Inventory } from './components/Inventory';
-import { Installments } from './components/Installments';
-import { Banks } from './components/Banks';
-import { Projects } from './components/Projects';
-import { Ledger } from './components/Ledger';
-import { Settings } from './components/Settings';
-import { SynapseVoiceChat } from './components/SynapseVoiceChat';
-import { AppHub } from './components/AppHub';
-import { LicenseManager } from './components/LicenseManager';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import { OutboxSyncBadge } from './components/OutboxSyncBadge';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { UserManagementView } from './components/UserManagementView';
 import { LoginModal } from './components/LoginModal';
 import { UpgradeModal } from './components/UpgradeModal';
 import { HabinoLandingPage } from './components/HabinoLandingPage';
@@ -26,7 +13,22 @@ import { BazaarOnboardingModal } from './components/BazaarOnboardingModal';
 import { SecurityGate } from './components/common/SecurityGates';
 import { ROLE_DETAILS_FA } from './lib/authEngine';
 
-// Lazy-loaded heavy modules for optimized bundle splitting & faster first load
+// Lazy-loaded core tabs & heavy studios for optimized bundle splitting & faster first load
+const Invoices = lazy(() => import('./components/Invoices').then(m => ({ default: m.Invoices })));
+const Checks = lazy(() => import('./components/Checks').then(m => ({ default: m.Checks })));
+const Transactions = lazy(() => import('./components/Transactions').then(m => ({ default: m.Transactions })));
+const Clients = lazy(() => import('./components/Clients').then(m => ({ default: m.Clients })));
+const Inventory = lazy(() => import('./components/Inventory').then(m => ({ default: m.Inventory })));
+const Installments = lazy(() => import('./components/Installments').then(m => ({ default: m.Installments })));
+const Banks = lazy(() => import('./components/Banks').then(m => ({ default: m.Banks })));
+const Projects = lazy(() => import('./components/Projects').then(m => ({ default: m.Projects })));
+const Ledger = lazy(() => import('./components/Ledger').then(m => ({ default: m.Ledger })));
+const Settings = lazy(() => import('./components/Settings').then(m => ({ default: m.Settings })));
+const SynapseVoiceChat = lazy(() => import('./components/SynapseVoiceChat').then(m => ({ default: m.SynapseVoiceChat })));
+const AppHub = lazy(() => import('./components/AppHub').then(m => ({ default: m.AppHub })));
+const LicenseManager = lazy(() => import('./components/LicenseManager').then(m => ({ default: m.LicenseManager })));
+const UserManagementView = lazy(() => import('./components/UserManagementView').then(m => ({ default: m.UserManagementView })));
+
 const DiagnosticModule = lazy(() => import('./components/DiagnosticModule').then(m => ({ default: m.DiagnosticModule })));
 const RoadmapStudio = lazy(() => import('./components/RoadmapStudio').then(m => ({ default: m.RoadmapStudio })));
 const HabinoDesktop = lazy(() => import('./components/HabinoDesktop').then(m => ({ default: m.HabinoDesktop })));
@@ -236,6 +238,9 @@ const MainLayout: React.FC = () => {
 
             {/* PWA In-App Install Button */}
             <PWAInstallButton variant="compact" />
+
+            {/* Offline Outbox Queue Live Sync Badge */}
+            <OutboxSyncBadge variant="navbar" />
 
             {/* Supabase Live Connection Quick Badge/Button */}
             <button

@@ -5,7 +5,7 @@
  */
 
 const DB_NAME = 'habino_indexed_db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export const INDEXED_DB_STORES = [
   'invoices',
@@ -17,7 +17,8 @@ export const INDEXED_DB_STORES = [
   'installments',
   'projects',
   'accountingEntries',
-  'companySettings'
+  'companySettings',
+  'outbox'
 ] as const;
 
 export type IndexedDbStoreName = typeof INDEXED_DB_STORES[number];

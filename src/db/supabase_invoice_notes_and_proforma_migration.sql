@@ -123,19 +123,9 @@ CREATE INDEX IF NOT EXISTS idx_company_settings_tenant ON public.company_setting
 ALTER TABLE public.invoices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.company_settings ENABLE ROW LEVEL SECURITY;
 
--- سیاست امنیتی دسترسی به تنظیمات شرکت
+-- سیاست امنیتی دسترسی به تنظیمات شرکت و فاکتورها (منسوخ‌سازی سیاست‌های بدون احراز هویت)
 DROP POLICY IF EXISTS "company_settings_permissive_access" ON public.company_settings;
-CREATE POLICY "company_settings_permissive_access" ON public.company_settings
-FOR ALL TO authenticated, anon
-USING (true)
-WITH CHECK (true);
-
--- سیاست دسترسی به فاکتورها (با پشتیبانی از multi-tenancy و دسترسی مجاز)
 DROP POLICY IF EXISTS "invoices_permissive_sync_policy" ON public.invoices;
-CREATE POLICY "invoices_permissive_sync_policy" ON public.invoices
-FOR ALL TO authenticated, anon
-USING (true)
-WITH CHECK (true);
 
 -- ------------------------------------------------------------------------------
 -- ۴. پیام تایید اجرای موفق مایگریشن

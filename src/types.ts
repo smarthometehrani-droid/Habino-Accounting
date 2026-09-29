@@ -20,6 +20,8 @@ export interface Client {
   status?: 'active' | 'inactive';
   metadata?: Record<string, any>; // JSONB guild/custom metadata
   created_at?: string;
+  updated_at?: string;
+  version?: number;
 }
 
 export interface InventoryItem {
@@ -37,6 +39,9 @@ export interface InventoryItem {
   description?: string;
   type?: 'good' | 'service';
   metadata?: Record<string, any>; // JSONB guild-specific strategy parameters (e.g. batch, expiry, specs)
+  created_at?: string;
+  updated_at?: string;
+  version?: number;
 }
 
 export interface BarcodeScanRecord {
@@ -118,6 +123,9 @@ export interface Invoice {
   designConfig?: InvoiceDesignConfig;
   metadata?: Record<string, any>; // JSONB guild-specific document metadata
   created_at?: string;
+  updated_at?: string;
+  version?: number;
+  baseVersion?: number;
   is_deleted?: boolean;
   deleted_at?: string;
   // ماژول امضای فیزیکی و تایید پیش‌فاکتور
@@ -177,6 +185,9 @@ export interface Check {
   notes?: string;
   relatedInvoiceId?: string;
   relatedInstallmentId?: string;
+  created_at?: string;
+  updated_at?: string;
+  version?: number;
 }
 
 export type TransactionType = 'income' | 'expense' | 'transfer';
@@ -197,6 +208,9 @@ export interface Transaction {
   relatedInvoiceId?: string;
   relatedCheckId?: string;
   metadata?: Record<string, any>; // JSONB guild/audit metadata
+  created_at?: string;
+  updated_at?: string;
+  version?: number;
 }
 
 export interface Installment {
@@ -212,6 +226,9 @@ export interface Installment {
   checkId?: string;
   clientId: string;
   clientName?: string;
+  created_at?: string;
+  updated_at?: string;
+  version?: number;
 }
 
 export interface BankAccount {
@@ -224,6 +241,9 @@ export interface BankAccount {
   balance: number;
   branch?: string;
   holderName: string;
+  created_at?: string;
+  updated_at?: string;
+  version?: number;
 }
 
 export interface Project {
@@ -241,6 +261,9 @@ export interface Project {
   netProfit?: number;
   description?: string;
   rfpId?: string; // Linked RFP if originated from SiraFlow workflow
+  created_at?: string;
+  updated_at?: string;
+  version?: number;
 }
 
 // ==========================================
@@ -512,6 +535,8 @@ export interface AccountingEntry {
   baseCredit?: number; // مبلغ بستانکار به ریال پایه
   exchangeRate?: number; // ضریب تبدیل به ریال (مثلاً برای تومان = ۱۰)
   created_at?: string;
+  updated_at?: string;
+  version?: number;
 }
 
 export interface CompanySettings {

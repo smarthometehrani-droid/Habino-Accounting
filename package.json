@@ -9,6 +9,9 @@
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "test:accounting": "tsx scripts/run-accounting-tests.ts",
+    "test:security": "tsx scripts/run-security-and-rls-tests.ts",
+    "test:supabase:local": "tsx scripts/run-supabase-local-docker-test.ts",
+    "db:migrate": "tsx scripts/apply-supabase-migration.ts",
     "start": "node dist/server.cjs"
   },
   "dependencies": {

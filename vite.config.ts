@@ -90,7 +90,12 @@ export default defineConfig({
         manualChunks: {
           'vendor-charts': ['recharts'],
           'vendor-icons': ['lucide-react'],
-          'vendor-supabase': ['@supabase/supabase-js']
+          'vendor-supabase': ['@supabase/supabase-js'],
+          'vendor-pdf': ['jspdf', 'html2canvas', 'html2canvas-pro'],
+          'vendor-barcode': ['@zxing/library'],
+          'vendor-leaflet': ['leaflet', 'react-leaflet'],
+          'vendor-datepicker': ['react-multi-date-picker', 'react-date-object'],
+          'vendor-ai': ['@google/genai', 'openai']
         }
       }
     }

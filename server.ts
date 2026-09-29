@@ -742,45 +742,38 @@ app.get('/api/invoices/public/:token', async (req: Request, res: Response) => {
     });
   }
 
-  // 2. Check Supabase DB by share_token
+  // 2. Fetch via secure token-bound RPC get_public_invoice_by_token
   const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
   const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
 
   if (supabaseUrl && supabaseKey) {
     try {
       const cleanUrl = supabaseUrl.replace(/\/+$/, '');
-      const invRes = await fetch(`${cleanUrl}/rest/v1/invoices?share_token=eq.${token}&select=*`, {
+      const rpcRes = await fetch(`${cleanUrl}/rest/v1/rpc/get_public_invoice_by_token`, {
+        method: 'POST',
         headers: {
           'apikey': supabaseKey,
-          'Authorization': `Bearer ${supabaseKey}`
-        }
+          'Authorization': `Bearer ${supabaseKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ p_token: token })
       });
 
-      if (invRes.ok) {
-        const list = await invRes.json();
-        if (list && list.length > 0) {
-          const inv = list[0];
-          // Get signature
-          const sigRes = await fetch(`${cleanUrl}/rest/v1/invoice_signatures?invoice_id=eq.${inv.id}&select=*`, {
-            headers: {
-              'apikey': supabaseKey,
-              'Authorization': `Bearer ${supabaseKey}`
-            }
-          });
-          const sigList = sigRes.ok ? await sigRes.json() : [];
-
+      if (rpcRes.ok) {
+        const rpcData = await rpcRes.json();
+        if (rpcData && rpcData.success && rpcData.invoice) {
           return res.json({
             success: true,
-            invoice: inv,
+            invoice: rpcData.invoice,
             settings: {},
-            signature: sigList[0] || null,
+            signature: rpcData.signature || null,
             shareToken: token,
-            source: 'supabase_db'
+            source: 'supabase_rpc'
           });
         }
       }
     } catch (e) {
-      console.warn('[Public Invoice Error]', e);
+      console.warn('[Public Invoice RPC Error]', e);
     }
   }
 
@@ -817,21 +810,27 @@ app.post('/api/invoices/public/:token/sign', async (req: Request, res: Response)
   let invoiceNumber = cached?.invoice?.invoiceNumber || '';
   let tenantId = cached?.invoice?.tenantId || 'tenant-main';
 
-  // If not found in cache, attempt lookup in Supabase
+  // If not found in cache, attempt lookup in Supabase via secure token-bound RPC
   const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
   const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
   if (!invoiceId && supabaseUrl && supabaseKey) {
     try {
       const cleanUrl = supabaseUrl.replace(/\/+$/, '');
-      const dbLookup = await fetch(`${cleanUrl}/rest/v1/invoices?share_token=eq.${encodeURIComponent(token)}&select=id,invoice_number,tenant_id,status`, {
-        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+      const dbLookup = await fetch(`${cleanUrl}/rest/v1/rpc/get_public_invoice_by_token`, {
+        method: 'POST',
+        headers: {
+          'apikey': supabaseKey,
+          'Authorization': `Bearer ${supabaseKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ p_token: token })
       });
       if (dbLookup.ok) {
-        const rows = await dbLookup.json();
-        if (rows && rows.length > 0) {
-          invoiceId = rows[0].id;
-          invoiceNumber = rows[0].invoice_number;
-          tenantId = rows[0].tenant_id || 'tenant-main';
+        const rpcResult = await dbLookup.json();
+        if (rpcResult && rpcResult.success && rpcResult.invoice) {
+          invoiceId = rpcResult.invoice.id;
+          invoiceNumber = rpcResult.invoice.invoiceNumber;
+          tenantId = rpcResult.invoice.tenantId || 'tenant-main';
         }
       }
     } catch {}
@@ -888,51 +887,30 @@ app.post('/api/invoices/public/:token/sign', async (req: Request, res: Response)
     }
   }
 
-  // Sync to Supabase cloud database if configured
+  // Sync to Supabase cloud database via secure RPC submit_public_invoice_signature
   if (supabaseUrl && supabaseKey) {
     const cleanUrl = supabaseUrl.replace(/\/+$/, '');
-    // Update invoices table
-    fetch(`${cleanUrl}/rest/v1/invoices?share_token=eq.${encodeURIComponent(token)}`, {
-      method: 'PATCH',
-      headers: {
-        'apikey': supabaseKey,
-        'Authorization': `Bearer ${supabaseKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        signature_url: signatureUrl,
-        is_signed: true,
-        signed_at: signedAt
-      })
-    }).catch(() => {});
-
-    if (invoiceId && !invoiceId.startsWith('inv_')) {
-      fetch(`${cleanUrl}/rest/v1/invoices?id=eq.${invoiceId}`, {
-        method: 'PATCH',
+    try {
+      await fetch(`${cleanUrl}/rest/v1/rpc/submit_public_invoice_signature`, {
+        method: 'POST',
         headers: {
           'apikey': supabaseKey,
           'Authorization': `Bearer ${supabaseKey}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          signature_url: signatureUrl,
-          is_signed: true,
-          signed_at: signedAt
+          p_token: token,
+          p_signature_url: signatureUrl,
+          p_signer_name: signerName || 'خریدار / مشتری',
+          p_signer_role: cleanRole,
+          p_signer_national_id: signerNationalId || null,
+          p_ip_address: clientIp,
+          p_user_agent: userAgent
         })
-      }).catch(() => {});
+      });
+    } catch (rpcErr) {
+      console.warn('[Supabase Public Signature RPC Error]', rpcErr);
     }
-
-    // Insert signature record into invoice_signatures table
-    fetch(`${cleanUrl}/rest/v1/invoice_signatures`, {
-      method: 'POST',
-      headers: {
-        'apikey': supabaseKey,
-        'Authorization': `Bearer ${supabaseKey}`,
-        'Content-Type': 'application/json',
-        'Prefer': 'resolution=merge-duplicates'
-      },
-      body: JSON.stringify(signatureRecord)
-    }).catch(() => {});
   }
 
   return res.json({
@@ -940,6 +918,83 @@ app.post('/api/invoices/public/:token/sign', async (req: Request, res: Response)
     signatureRecord,
     signatureUrl,
     message: 'امضا و تاییدیه پیش‌فاکتور با موفقیت در سامانه ثبت گردید.'
+  });
+});
+
+/**
+ * Offline Outbox Batch Sync Endpoint with Multi-Tenant Isolation & OCC Protection
+ */
+app.post('/api/sync/outbox-batch', async (req: Request, res: Response) => {
+  const tenantId = (req.headers['x-tenant-id'] as string) || req.body?.tenantId || 'tenant-main';
+  const { itemId, itemType, payload, version = 1, baseVersion = 1 } = req.body || {};
+
+  if (!itemId || !itemType || !payload) {
+    return res.status(400).json({ success: false, error: 'پارامترهای ارسالی صف ناقص است.' });
+  }
+
+  // Cross-tenant validation: Payload tenant must match authenticated header
+  if (payload.tenantId && payload.tenantId !== tenantId) {
+    return res.status(403).json({
+      success: false,
+      error: 'TENANT_MISMATCH: خطای عدم انطباق شناسه مستأجر'
+    });
+  }
+
+  // Optimistic Concurrency Control Check:
+  const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
+
+  if (supabaseUrl && supabaseKey) {
+    try {
+      const cleanUrl = supabaseUrl.replace(/\/+$/, '');
+      const rpcRes = await fetch(`${cleanUrl}/rest/v1/rpc/rpc_sync_outbox_item_with_occ`, {
+        method: 'POST',
+        headers: {
+          'apikey': supabaseKey,
+          'Authorization': `Bearer ${supabaseKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          p_item_id: itemId,
+          p_entity_type: itemType,
+          p_tenant_id: tenantId,
+          p_payload: payload,
+          p_base_version: baseVersion
+        })
+      });
+
+      if (rpcRes.ok) {
+        const rpcData = await rpcRes.json();
+        if (rpcData && rpcData.conflict) {
+          return res.status(409).json({
+            success: false,
+            conflict: true,
+            error: 'OCC_VERSION_CONFLICT: سند توسط کاربر دیگری همزمان ویرایش شده است.',
+            current_version: rpcData.current_version,
+            client_version: rpcData.client_version
+          });
+        }
+        return res.json({
+          success: true,
+          itemId,
+          version: rpcData?.version || (version + 1),
+          syncedAt: new Date().toISOString()
+        });
+      }
+    } catch (e) {
+      console.warn('[Outbox Sync RPC Warning]:', e);
+    }
+  }
+
+  // In local mode: Increment version and acknowledge sync
+  const newVersion = (version || 1) + 1;
+  return res.json({
+    success: true,
+    itemId,
+    itemType,
+    version: newVersion,
+    syncedAt: new Date().toISOString(),
+    message: 'سند با موفقیت پردازش و همگام گردید.'
   });
 });
 

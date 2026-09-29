@@ -34,6 +34,7 @@ import { LiveSupabaseTester } from './LiveSupabaseTester';
 import { PreLaunchAcceptanceStudio } from './PreLaunchAcceptanceStudio';
 import { AccountingVerificationStudio } from './AccountingVerificationStudio';
 import { PWAInstallButton } from './PWAInstallButton';
+import { OutboxSyncBadge } from './OutboxSyncBadge';
 import { OfflineIndicator } from './OfflineIndicator';
 import { SecurityGate } from './common/SecurityGates';
 
@@ -1169,6 +1170,9 @@ export const HabinoDesktop: React.FC<HabinoDesktopProps> = ({ onSwitchToClassicV
           </button>
 
           <PWAInstallButton variant="compact" />
+
+          {/* Offline Outbox Queue Live Sync Badge */}
+          <OutboxSyncBadge variant="taskbar" />
 
           <button
             onClick={() => openApp('synapse')}

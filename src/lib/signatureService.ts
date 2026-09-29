@@ -1,6 +1,7 @@
 import { getSupabaseConfig } from './supabase';
 import { createClient } from '@supabase/supabase-js';
 import { Invoice, InvoiceSignature } from '../types';
+import { offlineOutbox } from './offlineOutboxQueue';
 
 export interface UploadSignatureOptions {
   invoiceId: string;
@@ -236,6 +237,24 @@ export async function uploadAndRecordSignature(
   };
 
   const isFullyPersisted = dbPersisted && bucketPersisted;
+
+  if (!isFullyPersisted) {
+    try {
+      offlineOutbox.enqueue('signature', {
+        invoiceId,
+        invoiceNumber,
+        dataUrl,
+        signatureUrl: publicSignatureUrl,
+        signerName,
+        signerRole,
+        signerNationalId,
+        shareToken,
+        signatureRecord
+      }, tenantId);
+    } catch (e) {
+      console.warn('[SignatureService] Failed to enqueue to offlineOutbox:', e);
+    }
+  }
 
   return {
     success: true,

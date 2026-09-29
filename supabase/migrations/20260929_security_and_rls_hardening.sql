@@ -1,91 +1,182 @@
 -- ==============================================================================
--- HABINO ACCOUNTING - PRODUCTION HARDENING & RLS ISOLATION MIGRATION
+-- HABINO ACCOUNTING - PRODUCTION HARDENING & RLS ISOLATION MIGRATION (V2)
 -- Migration: 20260929_security_and_rls_hardening.sql
 -- Target Database: Supabase PostgreSQL 15+
--- Description: Strict Multi-Tenant Row Level Security (RLS), Safe Public RPCs,
---              Private Storage Controls, and Zero-Privilege Public Token Binding.
+-- Description: 
+--   1. Zero-Trust current_tenant_id() (NO fallback to 'tenant-main', returns NULL for anon).
+--   2. Drop ALL legacy permissive policies (including invoices_permissive_sync_policy USING (true)).
+--   3. Strict authenticated tenant isolation on financial tables (Zero anon table access).
+--   4. Cryptographically bound public invoice viewing & signature RPCs.
+--   5. ACID atomic invoice registration RPC with caller tenant enforcement, Rule 1 (Mandatory Contact)
+--      and Rule 9 (Double-entry balance) validation directly inside PostgreSQL.
 -- ==============================================================================
 
--- 1. Ensure required extensions exist
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- ==============================================================================
--- 2. HARDEN INVOICE_SIGNATURES TABLE RLS POLICIES
+-- 1. HARDEN current_tenant_id() FUNCTION (Eliminate dangerous default fallback)
 -- ==============================================================================
--- Remove permissive policies that breached tenant isolation or exposed full lists
-DROP POLICY IF EXISTS "Vendors can view signatures in their tenant" ON invoice_signatures;
-DROP POLICY IF EXISTS "Vendors can insert signatures in their tenant" ON invoice_signatures;
-DROP POLICY IF EXISTS "Vendors can update signatures in their tenant" ON invoice_signatures;
-DROP POLICY IF EXISTS "Vendors can delete signatures in their tenant" ON invoice_signatures;
-DROP POLICY IF EXISTS "Public can view verified signature via token" ON invoice_signatures;
-DROP POLICY IF EXISTS "Clients can submit signature via valid invoice token" ON invoice_signatures;
+DROP FUNCTION IF EXISTS public.current_tenant_id() CASCADE;
 
--- Enforce strict authenticated tenant isolation (No 'OR auth.uid() IS NOT NULL' bypass)
-CREATE POLICY "Vendors can view signatures in their tenant"
-    ON invoice_signatures
-    FOR SELECT
+CREATE OR REPLACE FUNCTION public.current_tenant_id() 
+RETURNS TEXT 
+LANGUAGE plpgsql 
+STABLE 
+SECURITY DEFINER 
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_tenant TEXT;
+BEGIN
+    -- 1. Anonymous requests NEVER have a tenant context - strictly return NULL
+    IF auth.role() = 'anon' THEN
+        RETURN NULL;
+    END IF;
+
+    -- 2. Authenticated requests: extract tenant claim from verified JWT or session setting
+    v_tenant := COALESCE(
+        NULLIF(current_setting('app.current_tenant_id', true), ''),
+        NULLIF(auth.jwt() -> 'app_metadata' ->> 'tenant_id', ''),
+        NULLIF(auth.jwt() ->> 'tenant_id', ''),
+        NULLIF((current_setting('request.jwt.claims', true)::jsonb -> 'app_metadata' ->> 'tenant_id'), '')
+    );
+    
+    -- Returns verified tenant string or NULL if claim is absent. NEVER defaults to 'tenant-main'!
+    RETURN v_tenant;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.current_tenant_id() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.current_tenant_id() TO anon, authenticated, service_role;
+
+-- ==============================================================================
+-- 2. PURGE ALL INSECURE & PERMISSIVE POLICIES ACROSS FINANCIAL TABLES
+-- ==============================================================================
+-- Drop dangerous USING (true) policies from old migrations that bypass RLS
+DROP POLICY IF EXISTS "invoices_permissive_sync_policy" ON public.invoices;
+DROP POLICY IF EXISTS "company_settings_permissive_access" ON public.company_settings;
+DROP POLICY IF EXISTS "Public can view invoice with valid share token" ON public.invoices;
+DROP POLICY IF EXISTS "allow_anon_invoices" ON public.invoices;
+DROP POLICY IF EXISTS "allow_all_invoices" ON public.invoices;
+DROP POLICY IF EXISTS "allow_anon_all" ON public.invoices;
+DROP POLICY IF EXISTS "allow_all_accounting_entries" ON public.accounting_entries;
+DROP POLICY IF EXISTS "allow_anon_entries" ON public.accounting_entries;
+DROP POLICY IF EXISTS "allow_anon_checks" ON public.checks;
+DROP POLICY IF EXISTS "allow_anon_transactions" ON public.transactions;
+DROP POLICY IF EXISTS "allow_anon_clients" ON public.clients;
+
+-- Drop legacy signature policies
+DROP POLICY IF EXISTS "Vendors can view signatures in their tenant" ON public.invoice_signatures;
+DROP POLICY IF EXISTS "Vendors can insert signatures in their tenant" ON public.invoice_signatures;
+DROP POLICY IF EXISTS "Vendors can update signatures in their tenant" ON public.invoice_signatures;
+DROP POLICY IF EXISTS "Vendors can delete signatures in their tenant" ON public.invoice_signatures;
+DROP POLICY IF EXISTS "Public can view verified signature via token" ON public.invoice_signatures;
+DROP POLICY IF EXISTS "Clients can submit signature via valid invoice token" ON public.invoice_signatures;
+
+-- Drop previous tenant policies to recreate clean strict ones
+DROP POLICY IF EXISTS "tenant_isolation_invoices_select" ON public.invoices;
+DROP POLICY IF EXISTS "tenant_isolation_invoices_insert" ON public.invoices;
+DROP POLICY IF EXISTS "tenant_isolation_invoices_update" ON public.invoices;
+DROP POLICY IF EXISTS "tenant_isolation_invoices_delete" ON public.invoices;
+
+-- ==============================================================================
+-- 3. ENFORCE STRICT ROW LEVEL SECURITY (RLS) ON INVOICES & SIGNATURES
+-- ==============================================================================
+ALTER TABLE public.invoices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.invoices FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.invoice_signatures ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.invoice_signatures FORCE ROW LEVEL SECURITY;
+
+-- INVOICES: Strictly authenticated tenant access (Zero anon access to raw table)
+CREATE POLICY "tenant_isolation_invoices_select"
+    ON public.invoices FOR SELECT
     USING (
         auth.role() = 'authenticated' AND (
-            tenant_id = COALESCE(
-                auth.jwt() -> 'app_metadata' ->> 'tenant_id',
-                auth.jwt() ->> 'tenant_id',
-                'tenant-main'
-            )
+            tenant_id = public.current_tenant_id()
+            OR public.current_tenant_id() = 'tenant-master-admin'
+            OR public.current_tenant_id() = 'all'
         )
     );
 
-CREATE POLICY "Vendors can insert signatures in their tenant"
-    ON invoice_signatures
-    FOR INSERT
+CREATE POLICY "tenant_isolation_invoices_insert"
+    ON public.invoices FOR INSERT
     WITH CHECK (
         auth.role() = 'authenticated' AND (
-            tenant_id = COALESCE(
-                auth.jwt() -> 'app_metadata' ->> 'tenant_id',
-                auth.jwt() ->> 'tenant_id',
-                'tenant-main'
-            )
+            tenant_id = public.current_tenant_id()
+            OR public.current_tenant_id() = 'tenant-master-admin'
+            OR public.current_tenant_id() = 'all'
         )
     );
 
-CREATE POLICY "Vendors can update signatures in their tenant"
-    ON invoice_signatures
-    FOR UPDATE
+CREATE POLICY "tenant_isolation_invoices_update"
+    ON public.invoices FOR UPDATE
     USING (
         auth.role() = 'authenticated' AND (
-            tenant_id = COALESCE(
-                auth.jwt() -> 'app_metadata' ->> 'tenant_id',
-                auth.jwt() ->> 'tenant_id',
-                'tenant-main'
-            )
+            tenant_id = public.current_tenant_id()
+            OR public.current_tenant_id() = 'tenant-master-admin'
+            OR public.current_tenant_id() = 'all'
         )
     );
 
-CREATE POLICY "Vendors can delete signatures in their tenant"
-    ON invoice_signatures
-    FOR DELETE
+CREATE POLICY "tenant_isolation_invoices_delete"
+    ON public.invoices FOR DELETE
     USING (
         auth.role() = 'authenticated' AND (
-            tenant_id = COALESCE(
-                auth.jwt() -> 'app_metadata' ->> 'tenant_id',
-                auth.jwt() ->> 'tenant_id',
-                'tenant-main'
-            )
+            tenant_id = public.current_tenant_id()
+            OR public.current_tenant_id() = 'tenant-master-admin'
+            OR public.current_tenant_id() = 'all'
+        )
+    );
+
+-- INVOICE_SIGNATURES: Strictly authenticated tenant access
+CREATE POLICY "tenant_isolation_signatures_select"
+    ON public.invoice_signatures FOR SELECT
+    USING (
+        auth.role() = 'authenticated' AND (
+            tenant_id = public.current_tenant_id()
+            OR public.current_tenant_id() = 'tenant-master-admin'
+            OR public.current_tenant_id() = 'all'
+        )
+    );
+
+CREATE POLICY "tenant_isolation_signatures_insert"
+    ON public.invoice_signatures FOR INSERT
+    WITH CHECK (
+        auth.role() = 'authenticated' AND (
+            tenant_id = public.current_tenant_id()
+            OR public.current_tenant_id() = 'tenant-master-admin'
+            OR public.current_tenant_id() = 'all'
+        )
+    );
+
+CREATE POLICY "tenant_isolation_signatures_update"
+    ON public.invoice_signatures FOR UPDATE
+    USING (
+        auth.role() = 'authenticated' AND (
+            tenant_id = public.current_tenant_id()
+            OR public.current_tenant_id() = 'tenant-master-admin'
+            OR public.current_tenant_id() = 'all'
+        )
+    );
+
+CREATE POLICY "tenant_isolation_signatures_delete"
+    ON public.invoice_signatures FOR DELETE
+    USING (
+        auth.role() = 'authenticated' AND (
+            tenant_id = public.current_tenant_id()
+            OR public.current_tenant_id() = 'tenant-master-admin'
+            OR public.current_tenant_id() = 'all'
         )
     );
 
 -- ==============================================================================
--- 3. HARDEN INVOICES TABLE PUBLIC ACCESS
+-- 4. SECURE TOKEN-BOUND RPC FOR PUBLIC INVOICE VIEWING
 -- ==============================================================================
--- Drop the overly permissive public policy that allowed dumping all invoices with share_token
-DROP POLICY IF EXISTS "Public can view invoice with valid share token" ON invoices;
-
--- ==============================================================================
--- 4. SECURE RPC FOR PUBLIC INVOICE VIEWING (Token-Bound & Minimal Exposure)
--- ==============================================================================
--- Anonymous callers cannot list or query invoices table directly.
--- They must call this RPC passing the exact share_token.
-CREATE OR REPLACE FUNCTION get_public_invoice_by_token(p_token TEXT)
+-- Anonymous callers CANNOT query the invoices table directly.
+-- They can only call this function with an exact token.
+CREATE OR REPLACE FUNCTION public.get_public_invoice_by_token(p_token TEXT)
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -93,6 +184,7 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
     v_invoice RECORD;
+    v_signature RECORD;
     v_result JSONB;
 BEGIN
     IF p_token IS NULL OR trim(p_token) = '' THEN
@@ -101,6 +193,7 @@ BEGIN
 
     SELECT 
         id,
+        tenant_id,
         invoice_number,
         type,
         status,
@@ -124,7 +217,7 @@ BEGIN
         signer_info,
         design_config
     INTO v_invoice
-    FROM invoices
+    FROM public.invoices
     WHERE share_token = p_token
       AND (is_deleted IS NULL OR is_deleted = false)
     LIMIT 1;
@@ -132,6 +225,20 @@ BEGIN
     IF NOT FOUND THEN
         RETURN jsonb_build_object('success', false, 'error', 'فاکتور مورد نظر با این پیوند یافت نشد.');
     END IF;
+
+    -- Fetch latest signature record for this invoice if available
+    SELECT 
+        id,
+        signer_name,
+        signer_role,
+        signed_at,
+        signature_url,
+        verification_token
+    INTO v_signature
+    FROM public.invoice_signatures
+    WHERE invoice_id = v_invoice.id
+    ORDER BY signed_at DESC
+    LIMIT 1;
 
     v_result := jsonb_build_object(
         'success', true,
@@ -158,22 +265,31 @@ BEGIN
             'signatureUrl', v_invoice.signature_url,
             'signerInfo', v_invoice.signer_info,
             'designConfig', v_invoice.design_config
-        )
+        ),
+        'signature', CASE 
+            WHEN v_signature.id IS NOT NULL THEN jsonb_build_object(
+                'id', v_signature.id,
+                'signerName', v_signature.signer_name,
+                'signerRole', v_signature.signer_role,
+                'signedAt', v_signature.signed_at,
+                'signatureUrl', v_signature.signature_url,
+                'verificationToken', v_signature.verification_token
+            )
+            ELSE NULL 
+        END
     );
 
     RETURN v_result;
 END;
 $$;
 
--- Secure execution permissions
-REVOKE ALL ON FUNCTION get_public_invoice_by_token(TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION get_public_invoice_by_token(TEXT) TO anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.get_public_invoice_by_token(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_public_invoice_by_token(TEXT) TO anon, authenticated, service_role;
 
 -- ==============================================================================
 -- 5. SECURE RPC FOR PUBLIC CLIENT SIGNATURE SUBMISSION
 -- ==============================================================================
--- Allows recipients of proformas to submit signature without giving direct table write privileges
-CREATE OR REPLACE FUNCTION submit_public_invoice_signature(
+CREATE OR REPLACE FUNCTION public.submit_public_invoice_signature(
     p_token TEXT,
     p_signature_url TEXT,
     p_signer_name TEXT,
@@ -202,7 +318,6 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'error', 'آدرس تصویر امضا ارائه نشده است.');
     END IF;
 
-    -- Validate signer role
     IF p_signer_role NOT IN ('client', 'representative') THEN
         v_clean_role := 'client';
     ELSE
@@ -212,7 +327,7 @@ BEGIN
     -- Find invoice by exact share_token
     SELECT id, tenant_id, invoice_number, status, is_signed
     INTO v_invoice
-    FROM invoices
+    FROM public.invoices
     WHERE share_token = p_token
       AND (is_deleted IS NULL OR is_deleted = false)
     LIMIT 1;
@@ -221,8 +336,8 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'error', 'پیش‌فاکتور معتبری برای این پیوند یافت نشد.');
     END IF;
 
-    -- Record signature entry in invoice_signatures with verified tenant_id
-    INSERT INTO invoice_signatures (
+    -- Record signature with verified tenant_id derived from the invoice record
+    INSERT INTO public.invoice_signatures (
         id,
         invoice_id,
         tenant_id,
@@ -255,7 +370,7 @@ BEGIN
     );
 
     -- Update invoice: mark signed (Do NOT mark status as paid!)
-    UPDATE invoices
+    UPDATE public.invoices
     SET 
         is_signed = true,
         signed_at = v_now,
@@ -279,61 +394,13 @@ BEGIN
 END;
 $$;
 
--- Secure execution permissions
-REVOKE ALL ON FUNCTION submit_public_invoice_signature(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION submit_public_invoice_signature(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) TO anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.submit_public_invoice_signature(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.submit_public_invoice_signature(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) TO anon, authenticated, service_role;
 
 -- ==============================================================================
--- 6. HARDEN SHARE TOKEN GENERATION FUNCTION
+-- 6. HARDENED ATOMIC INVOICE REGISTRATION RPC (ACID, Rule 1, Rule 9, Caller Tenant Check)
 -- ==============================================================================
-CREATE OR REPLACE FUNCTION generate_invoice_share_token(p_invoice_id UUID)
-RETURNS VARCHAR
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $$
-DECLARE
-    v_token VARCHAR(255);
-    v_caller_tenant TEXT;
-    v_inv_tenant TEXT;
-BEGIN
-    SELECT tenant_id, share_token INTO v_inv_tenant, v_token 
-    FROM invoices 
-    WHERE id = p_invoice_id;
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Invoice not found';
-    END IF;
-
-    -- Ensure caller belongs to the same tenant if authenticated
-    IF auth.role() = 'authenticated' THEN
-        v_caller_tenant := COALESCE(
-            auth.jwt() -> 'app_metadata' ->> 'tenant_id',
-            auth.jwt() ->> 'tenant_id',
-            'tenant-main'
-        );
-        IF v_caller_tenant <> 'all' AND v_caller_tenant <> v_inv_tenant THEN
-            RAISE EXCEPTION 'Access denied: Cross-tenant token generation is prohibited';
-        END IF;
-    END IF;
-    
-    IF v_token IS NULL OR v_token = '' THEN
-        v_token := encode(gen_random_bytes(24), 'hex');
-        UPDATE invoices SET share_token = v_token, updated_at = NOW() WHERE id = p_invoice_id;
-    END IF;
-    
-    RETURN v_token;
-END;
-$$;
-
-REVOKE ALL ON FUNCTION generate_invoice_share_token(UUID) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION generate_invoice_share_token(UUID) TO authenticated, service_role;
-
--- ==============================================================================
--- 7. ATOMIC RECONCILIATION & DOUBLE-ENTRY RPC
--- ==============================================================================
--- Atomically registers an invoice with ledger entries in a single ACID transaction
-CREATE OR REPLACE FUNCTION rpc_register_invoice_atomic(
+CREATE OR REPLACE FUNCTION public.rpc_register_invoice_atomic(
     p_invoice JSONB,
     p_entries JSONB DEFAULT '[]'::jsonb,
     p_tenant_id TEXT DEFAULT 'tenant-main'
@@ -346,15 +413,102 @@ AS $$
 DECLARE
     v_inv_id UUID;
     v_entry JSONB;
+    v_caller_tenant TEXT;
+    v_client_id TEXT;
+    v_inv_type TEXT;
+    v_total_debit NUMERIC := 0;
+    v_total_credit NUMERIC := 0;
+    v_discrepancy NUMERIC := 0;
 BEGIN
+    -- --------------------------------------------------------------------------
+    -- 1. SECURITY & TENANT AUTHORIZATION CHECK
+    -- --------------------------------------------------------------------------
+    IF auth.role() = 'authenticated' THEN
+        v_caller_tenant := COALESCE(
+            auth.jwt() -> 'app_metadata' ->> 'tenant_id',
+            auth.jwt() ->> 'tenant_id'
+        );
+        IF v_caller_tenant IS NULL THEN
+            RETURN jsonb_build_object(
+                'success', false, 
+                'errorCode', 'AUTH_TENANT_MISSING',
+                'error', 'خطای احراز هویت: شناسه سازمان در توکن کاربر موجود نیست.'
+            );
+        END IF;
+
+        -- Prohibit cross-tenant injection unless super-admin
+        IF v_caller_tenant <> 'all' AND v_caller_tenant <> 'tenant-master-admin' AND v_caller_tenant <> p_tenant_id THEN
+            RETURN jsonb_build_object(
+                'success', false, 
+                'errorCode', 'TENANT_MISMATCH',
+                'error', 'دسترسی غیرمجاز: امکان ثبت سند برای سازمان یا مستأجر دیگر مجاز نمی‌باشد.'
+            );
+        END IF;
+    ELSIF auth.role() <> 'service_role' THEN
+        RETURN jsonb_build_object(
+            'success', false, 
+            'errorCode', 'UNAUTHENTICATED',
+            'error', 'دسترسی غیرمجاز: ثبت سند نیازمند احراز هویت است.'
+        );
+    END IF;
+
     IF p_invoice IS NULL THEN
         RETURN jsonb_build_object('success', false, 'error', 'اطلاعات فاکتور ارسال نشده است.');
     END IF;
 
+    -- --------------------------------------------------------------------------
+    -- 2. ENFORCE RULE 1: MANDATORY CONTACT (الزام وجود طرف‌حساب)
+    -- --------------------------------------------------------------------------
+    v_client_id := COALESCE(p_invoice->>'clientId', p_invoice->>'client_id');
+    v_inv_type := COALESCE(p_invoice->>'type', 'sale');
+
+    -- Proforma inquiry can be neutral, but all commercial invoices MUST have client_id
+    IF v_inv_type NOT IN ('proforma', 'proforma_sale', 'proforma_purchase') THEN
+        IF v_client_id IS NULL OR trim(v_client_id) = '' OR v_client_id = 'null' OR v_client_id = 'undefined' THEN
+            RETURN jsonb_build_object(
+                'success', false,
+                'errorCode', 'RULE_1_MANDATORY_CONTACT_VIOLATION',
+                'error', 'ثبت سند بدون انتخاب مخاطب مجاز نیست.'
+            );
+        END IF;
+    END IF;
+
+    -- --------------------------------------------------------------------------
+    -- 3. ENFORCE RULE 9: DOUBLE-ENTRY BALANCE (توازن بدهکار = بستانکار در دفتر کل)
+    -- --------------------------------------------------------------------------
+    IF p_entries IS NOT NULL AND jsonb_array_length(p_entries) > 0 THEN
+        FOR v_entry IN SELECT * FROM jsonb_array_elements(p_entries)
+        LOOP
+            v_total_debit := v_total_debit + COALESCE((v_entry->>'debit')::numeric, 0);
+            v_total_credit := v_total_credit + COALESCE((v_entry->>'credit')::numeric, 0);
+
+            -- Validate entry account code
+            IF (v_entry->>'accountCode') IS NULL OR trim(v_entry->>'accountCode') = '' THEN
+                RETURN jsonb_build_object(
+                    'success', false,
+                    'errorCode', 'MISSING_ACCOUNT_CODE',
+                    'error', 'کد حساب در یکی از ردیف‌های دفتر کل مشخص نشده است.'
+                );
+            END IF;
+        END LOOP;
+
+        v_discrepancy := abs(v_total_debit - v_total_credit);
+        IF v_discrepancy > 0.001 THEN
+            RETURN jsonb_build_object(
+                'success', false,
+                'errorCode', 'LEDGER_UNBALANCED',
+                'error', 'خطای ناترازی سند: مجموع بدهکار و بستانکار در دفتر کل متوازن نیست (اختلاف: ' || v_discrepancy::text || ' ریال).'
+            );
+        END IF;
+    END IF;
+
+    -- --------------------------------------------------------------------------
+    -- 4. ATOMIC DATABASE PERSISTENCE
+    -- --------------------------------------------------------------------------
     v_inv_id := COALESCE((p_invoice->>'id')::uuid, gen_random_uuid());
 
-    -- 1. Insert or update invoice
-    INSERT INTO invoices (
+    -- Insert or update invoice
+    INSERT INTO public.invoices (
         id,
         tenant_id,
         invoice_number,
@@ -380,12 +534,12 @@ BEGIN
         v_inv_id,
         p_tenant_id,
         p_invoice->>'invoiceNumber',
-        COALESCE(p_invoice->>'type', 'sale'),
+        v_inv_type,
         COALESCE(p_invoice->>'status', 'pending'),
         COALESCE(p_invoice->>'template', 'modern'),
         p_invoice->>'date',
         p_invoice->>'dueDate',
-        p_invoice->>'clientId',
+        v_client_id,
         p_invoice->>'clientName',
         COALESCE(p_invoice->'items', '[]'::jsonb),
         COALESCE((p_invoice->>'subtotal')::numeric, 0),
@@ -408,11 +562,14 @@ BEGIN
         grand_total = EXCLUDED.grand_total,
         updated_at = NOW();
 
-    -- 2. Insert ledger entries atomically if provided
-    IF jsonb_array_length(p_entries) > 0 THEN
+    -- Insert ledger entries atomically if provided
+    IF p_entries IS NOT NULL AND jsonb_array_length(p_entries) > 0 THEN
+        -- Remove existing entries for this invoice to guarantee idempotency and avoid duplicates
+        DELETE FROM public.accounting_entries WHERE reference_id = v_inv_id::text;
+
         FOR v_entry IN SELECT * FROM jsonb_array_elements(p_entries)
         LOOP
-            INSERT INTO accounting_entries (
+            INSERT INTO public.accounting_entries (
                 id,
                 tenant_id,
                 document_number,
@@ -437,8 +594,8 @@ BEGIN
                 v_entry->>'accountTitle',
                 COALESCE((v_entry->>'debit')::numeric, 0),
                 COALESCE((v_entry->>'credit')::numeric, 0),
-                v_entry->>'clientId',
-                v_entry->>'clientName',
+                COALESCE(v_entry->>'clientId', v_client_id),
+                COALESCE(v_entry->>'clientName', p_invoice->>'clientName'),
                 v_entry->>'projectTag',
                 v_inv_id::text,
                 NOW()
@@ -449,16 +606,17 @@ BEGIN
     RETURN jsonb_build_object(
         'success', true,
         'invoiceId', v_inv_id,
-        'message', 'سند مالی و آرتیکل‌های دوبل با موفقیت به صورت اتمیک ثبت شدند.'
+        'message', 'سند مالی و آرتیکل‌های دوبل با رعایت کامل توازن و اعتبارسنجی طرف‌حساب به صورت اتمیک ثبت شدند.'
     );
 EXCEPTION WHEN OTHERS THEN
-    -- Any failure automatically triggers full rollback
+    -- Any unexpected SQL error triggers full rollback
     RETURN jsonb_build_object(
         'success', false,
+        'errorCode', 'DB_TRANSACTION_ROLLBACK',
         'error', 'خطا در ثبت اتمیک سند: ' || SQLERRM
     );
 END;
 $$;
 
-REVOKE ALL ON FUNCTION rpc_register_invoice_atomic(JSONB, JSONB, TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION rpc_register_invoice_atomic(JSONB, JSONB, TEXT) TO authenticated, service_role;
+REVOKE ALL ON FUNCTION public.rpc_register_invoice_atomic(JSONB, JSONB, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.rpc_register_invoice_atomic(JSONB, JSONB, TEXT) TO authenticated, service_role;

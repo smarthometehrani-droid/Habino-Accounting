@@ -25,6 +25,7 @@ import { Invoice, InvoiceSignature } from '../types';
 import { formatCurrency, toPersianDigits } from '../lib/currencyUtils';
 import { PhysicalSignatureCanvas, SignatureDataPayload } from './PhysicalSignatureCanvas';
 import { buildSharingLinks } from '../lib/signatureService';
+import { getSupabaseClient } from '../lib/supabase';
 
 interface PublicInvoiceViewProps {
   token: string;
@@ -62,18 +63,40 @@ export const PublicInvoiceView: React.FC<PublicInvoiceViewProps> = ({
       setIsLoading(true);
       setError(null);
       try {
-        const res = await fetch(`/api/invoices/public/${token}`);
-        if (!res.ok) {
+        let fetchedData: any = null;
+
+        // 1. Try server proxy first
+        try {
+          const res = await fetch(`/api/invoices/public/${token}`);
+          if (res.ok) {
+            fetchedData = await res.json();
+          }
+        } catch (_) {}
+
+        // 2. Direct Supabase RPC fallback if server proxy was unavailable
+        if (!fetchedData || !fetchedData.invoice) {
+          const client = getSupabaseClient();
+          if (client) {
+            const { data: rpcRes, error: rpcErr } = await client.rpc('get_public_invoice_by_token', {
+              p_token: token
+            });
+            if (!rpcErr && rpcRes && rpcRes.success && rpcRes.invoice) {
+              fetchedData = rpcRes;
+            }
+          }
+        }
+
+        if (!fetchedData || !fetchedData.invoice) {
           throw new Error('فاکتور یا پیش‌فاکتور مورد نظر یافت نشد یا ممکن است منقضی شده باشد.');
         }
-        const data = await res.json();
+
         if (isMounted) {
-          setInvoice(data.invoice);
-          if (data.settings && Object.keys(data.settings).length > 0) {
-            setSettings(data.settings);
+          setInvoice(fetchedData.invoice);
+          if (fetchedData.settings && Object.keys(fetchedData.settings).length > 0) {
+            setSettings(fetchedData.settings);
           }
-          if (data.signature) {
-            setSignature(data.signature);
+          if (fetchedData.signature) {
+            setSignature(fetchedData.signature);
           }
         }
       } catch (err: any) {
@@ -117,7 +140,7 @@ export const PublicInvoiceView: React.FC<PublicInvoiceViewProps> = ({
         isSigned: true,
         signatureUrl: result.signatureUrl,
         signedAt: result.signatureRecord?.signedAt,
-        status: 'paid'
+        status: prev.status === 'draft' ? 'pending' : prev.status
       } : prev);
 
       // همگام‌سازی فوری با حافظه محلی و برودکست رویداد امضا برای پنل اصلی نرم‌افزار
